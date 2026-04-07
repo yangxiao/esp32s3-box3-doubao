@@ -1,0 +1,16 @@
+# Build directory
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+
+# macOS
+.DS_Store
+
+# Executable
+doubao_client
+
+# Output files
+output.ogg
