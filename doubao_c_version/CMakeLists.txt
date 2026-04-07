@@ -12,6 +12,12 @@ pkg_check_modules(LWS REQUIRED libwebsockets)
 # portaudio
 pkg_check_modules(PORTAUDIO REQUIRED portaudio-2.0)
 
+# opus
+pkg_check_modules(OPUS REQUIRED opus)
+
+# ogg (for OGG/Opus decapsulation)
+pkg_check_modules(OGG REQUIRED ogg)
+
 # OpenSSL (required by libwebsockets)
 find_package(OpenSSL REQUIRED)
 
@@ -32,6 +38,8 @@ target_include_directories(doubao_client PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${LWS_INCLUDE_DIRS}
     ${PORTAUDIO_INCLUDE_DIRS}
+    ${OPUS_INCLUDE_DIRS}
+    ${OGG_INCLUDE_DIRS}
     ${ZLIB_INCLUDE_DIRS}
     ${OPENSSL_INCLUDE_DIR}
 )
@@ -39,11 +47,15 @@ target_include_directories(doubao_client PRIVATE
 target_link_directories(doubao_client PRIVATE
     ${LWS_LIBRARY_DIRS}
     ${PORTAUDIO_LIBRARY_DIRS}
+    ${OPUS_LIBRARY_DIRS}
+    ${OGG_LIBRARY_DIRS}
 )
 
 target_link_libraries(doubao_client
     ${LWS_LIBRARIES}
     ${PORTAUDIO_LIBRARIES}
+    ${OPUS_LIBRARIES}
+    ${OGG_LIBRARIES}
     ${ZLIB_LIBRARIES}
     pthread
 )

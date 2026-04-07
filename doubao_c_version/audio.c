@@ -52,7 +52,6 @@ static void queue_push(audio_queue_t *q, const uint8_t *data, size_t len) {
     pthread_mutex_unlock(&q->mutex);
 }
 
-/* Returns node or NULL. Waits up to timeout_ms. */
 static audio_node_t *queue_pop(audio_queue_t *q, int timeout_ms) {
     pthread_mutex_lock(&q->mutex);
     if (!q->head && timeout_ms > 0) {
@@ -99,8 +98,8 @@ static void *player_thread_func(void *arg) {
         audio_node_t *node = queue_pop(&am->play_queue, 500);
         if (node) {
             if (am->output_stream) {
-                Pa_WriteStream(am->output_stream, node->data,
-                               node->len / (am->output_channels * Pa_GetSampleSize(am->output_format)));
+                long frames = (long)(node->len / (am->output_channels * Pa_GetSampleSize(am->output_format)));
+                Pa_WriteStream(am->output_stream, node->data, frames);
             }
             free(node->data);
             free(node);
@@ -109,19 +108,19 @@ static void *player_thread_func(void *arg) {
     return NULL;
 }
 
-/* ---- Output buffer accumulation ---- */
+/* ---- OGG buffer for saving raw data ---- */
 
-static void output_buffer_append(audio_manager_t *am, const uint8_t *data, size_t len) {
-    if (am->output_buffer_len + len > am->output_buffer_cap) {
-        size_t new_cap = (am->output_buffer_cap + len) * 2;
+static void ogg_buffer_append(audio_manager_t *am, const uint8_t *data, size_t len) {
+    if (am->ogg_buffer_len + len > am->ogg_buffer_cap) {
+        size_t new_cap = (am->ogg_buffer_cap + len) * 2;
         if (new_cap < 65536) new_cap = 65536;
-        uint8_t *tmp = realloc(am->output_buffer, new_cap);
+        uint8_t *tmp = realloc(am->ogg_buffer, new_cap);
         if (!tmp) return;
-        am->output_buffer = tmp;
-        am->output_buffer_cap = new_cap;
+        am->ogg_buffer = tmp;
+        am->ogg_buffer_cap = new_cap;
     }
-    memcpy(am->output_buffer + am->output_buffer_len, data, len);
-    am->output_buffer_len += len;
+    memcpy(am->ogg_buffer + am->ogg_buffer_len, data, len);
+    am->ogg_buffer_len += len;
 }
 
 /* ---- Public API ---- */
@@ -131,29 +130,51 @@ int audio_init(audio_manager_t *am, const char *output_format) {
 
     am->input_sample_rate = INPUT_SAMPLE_RATE;
     am->input_channels = INPUT_CHANNELS;
-    am->input_chunk = INPUT_CHUNK;
+    am->input_chunk = OPUS_FRAME_SIZE; /* read exactly one Opus frame worth */
     am->input_format = paInt16;
 
-    am->output_sample_rate = OUTPUT_SAMPLE_RATE;
+    /* Opus decodes to 48kHz by default */
+    am->output_sample_rate = OUTPUT_SAMPLE_RATE; /* 48000 */
     am->output_channels = OUTPUT_CHANNELS;
     am->output_chunk = OUTPUT_CHUNK;
-
-    if (output_format && strcmp(output_format, "pcm_s16le") == 0) {
-        am->output_format = paInt16;
-    } else {
-        am->output_format = paFloat32;
-    }
+    am->output_format = paInt16;
 
     queue_init(&am->play_queue);
     am->playing = false;
 
-    am->output_buffer = NULL;
-    am->output_buffer_len = 0;
-    am->output_buffer_cap = 0;
+    am->ogg_buffer = NULL;
+    am->ogg_buffer_len = 0;
+    am->ogg_buffer_cap = 0;
 
-    PaError err = Pa_Initialize();
-    if (err != paNoError) {
-        fprintf(stderr, "PortAudio init error: %s\n", Pa_GetErrorText(err));
+    /* Init Opus encoder: 16kHz mono, VOIP application */
+    int err;
+    am->opus_encoder = opus_encoder_create(INPUT_SAMPLE_RATE, INPUT_CHANNELS,
+                                            OPUS_APPLICATION_VOIP, &err);
+    if (err != OPUS_OK || !am->opus_encoder) {
+        fprintf(stderr, "Opus encoder create failed: %s\n", opus_strerror(err));
+        return -1;
+    }
+    /* Set bitrate to 32kbps for good voice quality */
+    opus_encoder_ctl(am->opus_encoder, OPUS_SET_BITRATE(32000));
+
+    /* Init Opus decoder: 48kHz mono (Opus standard output rate) */
+    am->opus_decoder = opus_decoder_create(48000, 1, &err);
+    if (err != OPUS_OK || !am->opus_decoder) {
+        fprintf(stderr, "Opus decoder create failed: %s\n", opus_strerror(err));
+        opus_encoder_destroy(am->opus_encoder);
+        return -1;
+    }
+    am->opus_decoder_inited = true;
+
+    /* Init OGG sync state */
+    ogg_sync_init(&am->ogg_sync);
+    am->ogg_stream_inited = false;
+    am->ogg_headers_parsed = false;
+    am->ogg_header_count = 0;
+
+    PaError pa_err = Pa_Initialize();
+    if (pa_err != paNoError) {
+        fprintf(stderr, "PortAudio init error: %s\n", Pa_GetErrorText(pa_err));
         return -1;
     }
     return 0;
@@ -162,8 +183,7 @@ int audio_init(audio_manager_t *am, const char *output_format) {
 int audio_open_input(audio_manager_t *am) {
     PaError err = Pa_OpenDefaultStream(
         &am->input_stream,
-        am->input_channels,    /* input channels */
-        0,                     /* output channels */
+        am->input_channels, 0,
         am->input_format,
         am->input_sample_rate,
         am->input_chunk,
@@ -177,7 +197,7 @@ int audio_open_input(audio_manager_t *am) {
         fprintf(stderr, "Failed to start input stream: %s\n", Pa_GetErrorText(err));
         return -1;
     }
-    printf("Microphone opened (rate=%d, channels=%d, chunk=%d)\n",
+    printf("Microphone opened (rate=%d, channels=%d, opus_frame=%d)\n",
            am->input_sample_rate, am->input_channels, am->input_chunk);
     return 0;
 }
@@ -185,8 +205,7 @@ int audio_open_input(audio_manager_t *am) {
 int audio_open_output(audio_manager_t *am) {
     PaError err = Pa_OpenDefaultStream(
         &am->output_stream,
-        0,                      /* input channels */
-        am->output_channels,    /* output channels */
+        0, am->output_channels,
         am->output_format,
         am->output_sample_rate,
         am->output_chunk,
@@ -201,46 +220,136 @@ int audio_open_output(audio_manager_t *am) {
         return -1;
     }
 
-    /* Start player thread */
     am->playing = true;
     if (pthread_create(&am->player_thread, NULL, player_thread_func, am) != 0) {
         fprintf(stderr, "Failed to create player thread\n");
         return -1;
     }
 
-    printf("Speaker opened (rate=%d, channels=%d, chunk=%d)\n",
+    printf("Speaker opened (rate=%d, channels=%d, format=int16, chunk=%d)\n",
            am->output_sample_rate, am->output_channels, am->output_chunk);
     return 0;
 }
 
-uint8_t *audio_read_input(audio_manager_t *am, size_t *out_len) {
-    if (!am->input_stream) return NULL;
-    size_t sample_size = Pa_GetSampleSize(am->input_format);
-    size_t buf_size = am->input_chunk * am->input_channels * sample_size;
-    uint8_t *buf = malloc(buf_size);
-    if (!buf) return NULL;
+uint8_t *audio_read_input_opus(audio_manager_t *am, size_t *out_len) {
+    if (!am->input_stream || !am->opus_encoder) return NULL;
 
-    PaError err = Pa_ReadStream(am->input_stream, buf, am->input_chunk);
+    /* Read OPUS_FRAME_SIZE frames of int16 mono PCM */
+    int16_t pcm_buf[OPUS_FRAME_SIZE];
+    PaError err = Pa_ReadStream(am->input_stream, pcm_buf, OPUS_FRAME_SIZE);
     if (err != paNoError && err != paInputOverflowed) {
         fprintf(stderr, "Read input error: %s\n", Pa_GetErrorText(err));
-        free(buf);
         return NULL;
     }
-    *out_len = buf_size;
-    return buf;
+
+    /* Encode to Opus */
+    uint8_t *opus_buf = malloc(4000); /* max Opus frame size */
+    if (!opus_buf) return NULL;
+
+    int encoded = opus_encode(am->opus_encoder, pcm_buf, OPUS_FRAME_SIZE,
+                              opus_buf, 4000);
+    if (encoded < 0) {
+        fprintf(stderr, "Opus encode error: %s\n", opus_strerror(encoded));
+        free(opus_buf);
+        return NULL;
+    }
+
+    *out_len = (size_t)encoded;
+    return opus_buf;
+}
+
+void audio_decode_ogg_opus(audio_manager_t *am, const uint8_t *data, size_t len) {
+    if (!data || len == 0) return;
+
+    /* Save raw OGG data for debug */
+    ogg_buffer_append(am, data, len);
+
+    /* Feed data to OGG sync layer */
+    char *ogg_buf = ogg_sync_buffer(&am->ogg_sync, (long)len);
+    if (!ogg_buf) return;
+    memcpy(ogg_buf, data, len);
+    ogg_sync_wrote(&am->ogg_sync, (long)len);
+
+    /* Process OGG pages */
+    ogg_page page;
+    while (ogg_sync_pageout(&am->ogg_sync, &page) == 1) {
+        /* Initialize stream on first page */
+        if (!am->ogg_stream_inited) {
+            int serial = ogg_page_serialno(&page);
+            ogg_stream_init(&am->ogg_stream, serial);
+            am->ogg_stream_inited = true;
+            am->ogg_headers_parsed = false;
+            am->ogg_header_count = 0;
+        }
+
+        /* Check for new logical stream (new serial number) */
+        if (ogg_page_bos(&page) && am->ogg_stream_inited) {
+            int new_serial = ogg_page_serialno(&page);
+            if (new_serial != am->ogg_stream.serialno) {
+                ogg_stream_clear(&am->ogg_stream);
+                ogg_stream_init(&am->ogg_stream, new_serial);
+                am->ogg_headers_parsed = false;
+                am->ogg_header_count = 0;
+            }
+        }
+
+        ogg_stream_pagein(&am->ogg_stream, &page);
+
+        /* Process OGG packets */
+        ogg_packet packet;
+        while (ogg_stream_packetout(&am->ogg_stream, &packet) == 1) {
+            /* Skip OGG/Opus header packets (first 2: OpusHead + OpusTags) */
+            if (!am->ogg_headers_parsed) {
+                am->ogg_header_count++;
+                if (am->ogg_header_count >= 2) {
+                    am->ogg_headers_parsed = true;
+                }
+                continue;
+            }
+
+            /* Decode Opus packet to PCM */
+            /* Max frame: 120ms @ 48kHz = 5760 samples */
+            int16_t pcm_out[5760];
+            int decoded = opus_decode(am->opus_decoder,
+                                       packet.packet, (opus_int32)packet.bytes,
+                                       pcm_out, 5760, 0);
+            if (decoded > 0) {
+                size_t pcm_bytes = (size_t)decoded * sizeof(int16_t);
+                queue_push(&am->play_queue, (const uint8_t *)pcm_out, pcm_bytes);
+            } else if (decoded < 0) {
+                fprintf(stderr, "Opus decode error: %s\n", opus_strerror(decoded));
+            }
+        }
+    }
 }
 
 void audio_enqueue(audio_manager_t *am, const uint8_t *data, size_t len) {
     queue_push(&am->play_queue, data, len);
-    output_buffer_append(am, data, len);
 }
 
 void audio_queue_clear(audio_manager_t *am) {
     queue_clear(&am->play_queue);
 }
 
+void audio_reset_ogg_state(audio_manager_t *am) {
+    /* Reset OGG demuxer for new audio stream */
+    if (am->ogg_stream_inited) {
+        ogg_stream_clear(&am->ogg_stream);
+        am->ogg_stream_inited = false;
+    }
+    ogg_sync_clear(&am->ogg_sync);
+    ogg_sync_init(&am->ogg_sync);
+    am->ogg_headers_parsed = false;
+    am->ogg_header_count = 0;
+
+    /* Reset decoder state */
+    if (am->opus_decoder) {
+        opus_decoder_ctl(am->opus_decoder, OPUS_RESET_STATE);
+    }
+}
+
 void audio_save_output(audio_manager_t *am, const char *filename) {
-    if (!am->output_buffer || am->output_buffer_len == 0) {
+    if (!am->ogg_buffer || am->ogg_buffer_len == 0) {
         printf("No audio data to save.\n");
         return;
     }
@@ -249,14 +358,13 @@ void audio_save_output(audio_manager_t *am, const char *filename) {
         fprintf(stderr, "Failed to open %s for writing\n", filename);
         return;
     }
-    fwrite(am->output_buffer, 1, am->output_buffer_len, f);
+    fwrite(am->ogg_buffer, 1, am->ogg_buffer_len, f);
     fclose(f);
-    printf("Saved %zu bytes to %s\n", am->output_buffer_len, filename);
+    printf("Saved %zu bytes to %s\n", am->ogg_buffer_len, filename);
 }
 
 void audio_cleanup(audio_manager_t *am) {
     am->playing = false;
-    /* Wake up player thread if waiting */
     pthread_cond_signal(&am->play_queue.cond);
     pthread_join(am->player_thread, NULL);
 
@@ -270,7 +378,21 @@ void audio_cleanup(audio_manager_t *am) {
     }
     Pa_Terminate();
 
+    if (am->opus_encoder) {
+        opus_encoder_destroy(am->opus_encoder);
+        am->opus_encoder = NULL;
+    }
+    if (am->opus_decoder) {
+        opus_decoder_destroy(am->opus_decoder);
+        am->opus_decoder = NULL;
+    }
+
+    if (am->ogg_stream_inited) {
+        ogg_stream_clear(&am->ogg_stream);
+    }
+    ogg_sync_clear(&am->ogg_sync);
+
     queue_destroy(&am->play_queue);
-    free(am->output_buffer);
-    am->output_buffer = NULL;
+    free(am->ogg_buffer);
+    am->ogg_buffer = NULL;
 }

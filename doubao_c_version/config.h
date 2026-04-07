@@ -11,9 +11,12 @@
 #define INPUT_CHANNELS      1
 #define INPUT_CHUNK         3200    /* frames per chunk */
 
-#define OUTPUT_SAMPLE_RATE  24000
+#define OUTPUT_SAMPLE_RATE  48000
 #define OUTPUT_CHANNELS     1
-#define OUTPUT_CHUNK        3200
+#define OUTPUT_CHUNK        2880    /* 60ms @ 48kHz */
+
+/* Opus encoder frame size: 960 frames = 60ms @ 16kHz */
+#define OPUS_FRAME_SIZE     960
 
 /* ---- WebSocket config ---- */
 #define WS_HOST         "openspeech.bytedance.com"
@@ -44,18 +47,35 @@ static inline void generate_uuid(char *buf, size_t len) {
 }
 
 /* ---- Build start_session JSON ---- */
-static inline const char *build_start_session_json(const char *output_format,
+/* asr_audio_format: "speech_opus" for opus mic input, or NULL to omit audio_info (PCM default) */
+static inline const char *build_start_session_json(const char *asr_audio_format,
                                                     const char *input_mod,
                                                     int recv_timeout) {
     static char json_buf[2048];
+    char asr_block[256];
+    if (asr_audio_format) {
+        snprintf(asr_block, sizeof(asr_block),
+            "\"asr\":{"
+                "\"audio_info\":{"
+                    "\"format\":\"%s\","
+                    "\"sample_rate\":16000,"
+                    "\"channel\":1"
+                "},"
+                "\"extra\":{\"end_smooth_window_ms\":1500}"
+            "},",
+            asr_audio_format);
+    } else {
+        snprintf(asr_block, sizeof(asr_block),
+            "\"asr\":{\"extra\":{\"end_smooth_window_ms\":1500}},");
+    }
     snprintf(json_buf, sizeof(json_buf),
         "{"
-            "\"asr\":{\"extra\":{\"end_smooth_window_ms\":1500}},"
+            "%s"
             "\"tts\":{"
                 "\"speaker\":\"%s\","
                 "\"audio_config\":{"
                     "\"channel\":1,"
-                    "\"format\":\"%s\","
+                    "\"format\":\"ogg_opus\","
                     "\"sample_rate\":24000"
                 "}"
             "},"
@@ -72,7 +92,7 @@ static inline const char *build_start_session_json(const char *output_format,
                 "}"
             "}"
         "}",
-        TTS_SPEAKER, output_format, recv_timeout, input_mod);
+        asr_block, TTS_SPEAKER, recv_timeout, input_mod);
     return json_buf;
 }
 
