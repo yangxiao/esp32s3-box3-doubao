@@ -7,11 +7,10 @@
 此demo使用python3.7环境进行开发调试，其他python版本可能会有兼容性问题，需要自己尝试解决。
 
 1. 配置API密钥
-   - 打开 `config.py` 文件
-   - 修改以下两个字段：
-     ```python
-     "X-Api-App-ID": "火山控制台上端到端大模型对应的App ID",
-     "X-Api-Access-Key": "火山控制台上端到端大模型对应的Access Key",
+   - 设置以下环境变量：
+     ```bash
+     export DOUBAO_APP_ID="火山控制台上端到端大模型对应的App ID"
+     export DOUBAO_ACCESS_KEY="火山控制台上端到端大模型对应的Access Key"
      ```
    - 修改speaker字段指定发音人，本次支持四个发音人：
      - `zh_female_vv_jupiter_bigtts`：中文vv女声
