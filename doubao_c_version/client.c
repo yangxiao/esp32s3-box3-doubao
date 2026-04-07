@@ -208,7 +208,8 @@ static const struct lws_protocols protocols[] = {
 /* ---- Public API ---- */
 
 int client_init(doubao_client_t *client, const char *session_id,
-                const char *output_format, const char *input_mod, int recv_timeout) {
+                const char *output_format, const char *input_mod,
+                const char *asr_audio_format, int recv_timeout) {
     memset(client, 0, sizeof(*client));
 
     strncpy(client->host, WS_HOST, sizeof(client->host) - 1);
@@ -231,6 +232,12 @@ int client_init(doubao_client_t *client, const char *session_id,
     strncpy(client->session_id, session_id, sizeof(client->session_id) - 1);
     strncpy(client->output_format, output_format, sizeof(client->output_format) - 1);
     strncpy(client->input_mod, input_mod, sizeof(client->input_mod) - 1);
+    if (asr_audio_format && strlen(asr_audio_format) > 0) {
+        strncpy(client->asr_audio_format, asr_audio_format, sizeof(client->asr_audio_format) - 1);
+        client->use_opus_input = true;
+    } else {
+        client->use_opus_input = false;
+    }
     client->recv_timeout = recv_timeout;
 
     client->send_head = 0;
@@ -353,8 +360,9 @@ int client_start_connection(doubao_client_t *client) {
 }
 
 int client_start_session(doubao_client_t *client) {
+    const char *asr_fmt = (strlen(client->asr_audio_format) > 0) ? client->asr_audio_format : NULL;
     const char *json = build_start_session_json(
-        client->output_format, client->input_mod, client->recv_timeout);
+        asr_fmt, client->input_mod, client->recv_timeout);
     size_t msg_len;
     uint8_t *buf = build_command(
         MSG_CLIENT_FULL_REQUEST, FLAG_MSG_WITH_EVENT,
@@ -378,10 +386,12 @@ int client_say_hello(doubao_client_t *client) {
 }
 
 int client_task_request(doubao_client_t *client, const uint8_t *audio, size_t audio_len) {
+    /* Opus is already compressed, no gzip. PCM uses gzip. */
+    uint8_t compress = client->use_opus_input ? COMPRESS_NONE : COMPRESS_GZIP;
     size_t msg_len;
     uint8_t *buf = build_command(
         MSG_CLIENT_AUDIO_ONLY, FLAG_MSG_WITH_EVENT,
-        SERIAL_NONE, COMPRESS_GZIP,
+        SERIAL_NONE, compress,
         CMD_TASK_REQUEST, client->session_id,
         audio, audio_len,
         true, &msg_len);

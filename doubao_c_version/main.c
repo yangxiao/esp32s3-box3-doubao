@@ -52,9 +52,9 @@ static void on_ws_receive(const uint8_t *data, size_t len, void *userdata) {
     }
 
     if (resp.message_type == MSG_SERVER_ACK && resp.is_binary && resp.payload_data) {
-        /* Audio data */
+        /* OGG/Opus audio data — decode and enqueue PCM */
         if (s->has_audio) {
-            audio_enqueue(&s->audio, resp.payload_data, resp.payload_data_len);
+            audio_decode_ogg_opus(&s->audio, resp.payload_data, resp.payload_data_len);
         }
     } else if (resp.message_type == MSG_SERVER_FULL_RESPONSE) {
         /* Print text response */
@@ -68,6 +68,7 @@ static void on_ws_receive(const uint8_t *data, size_t len, void *userdata) {
                 printf("Event 450: clear audio cache\n");
                 if (s->has_audio) {
                     audio_queue_clear(&s->audio);
+                    audio_reset_ogg_state(&s->audio);
                 }
                 s->user_querying = true;
                 break;
@@ -132,7 +133,7 @@ static void *mic_input_thread_func(void *arg) {
 
     while (s->running) {
         size_t audio_len;
-        uint8_t *audio_data = audio_read_input(&s->audio, &audio_len);
+        uint8_t *audio_data = audio_read_input_opus(&s->audio, &audio_len);
         if (audio_data) {
             client_task_request(&s->client, audio_data, audio_len);
             free(audio_data);
@@ -213,6 +214,9 @@ static void print_usage(const char *prog) {
 }
 
 int main(int argc, char *argv[]) {
+    /* Disable stdout buffering for immediate output */
+    setbuf(stdout, NULL);
+
     /* Default options */
     char format[32] = "pcm";
     char audio_file[512] = "";
@@ -272,7 +276,9 @@ int main(int argc, char *argv[]) {
     generate_uuid(session_id, sizeof(session_id));
 
     /* Init client */
-    if (client_init(&s->client, session_id, format, mod, recv_timeout) != 0) {
+    /* Use opus ASR format for mic/text modes, PCM (NULL) for audio file mode */
+    const char *asr_fmt = is_audio_file ? NULL : "speech_opus";
+    if (client_init(&s->client, session_id, format, mod, asr_fmt, recv_timeout) != 0) {
         return 1;
     }
     client_set_recv_callback(&s->client, on_ws_receive, s);
@@ -361,7 +367,7 @@ int main(int argc, char *argv[]) {
 
     /* Save output audio */
     if (s->has_audio) {
-        audio_save_output(&s->audio, "output.pcm");
+        audio_save_output(&s->audio, "output.ogg");
         audio_cleanup(&s->audio);
     }
 

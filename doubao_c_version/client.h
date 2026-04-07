@@ -39,6 +39,8 @@ typedef struct {
     char session_id[128];
     char output_format[32];
     char input_mod[32];
+    char asr_audio_format[32]; /* "speech_opus" or empty for PCM */
+    bool use_opus_input;       /* true = opus input (no gzip), false = PCM (gzip) */
     int recv_timeout;
 
     /* Send queue (ring buffer) */
@@ -64,9 +66,11 @@ typedef struct {
     char logid[256];
 } doubao_client_t;
 
-/* Initialize client. Returns 0 on success. */
+/* Initialize client. Returns 0 on success.
+ * asr_audio_format: "speech_opus" for opus input, or NULL/empty for PCM. */
 int client_init(doubao_client_t *client, const char *session_id,
-                const char *output_format, const char *input_mod, int recv_timeout);
+                const char *output_format, const char *input_mod,
+                const char *asr_audio_format, int recv_timeout);
 
 /* Set receive callback */
 void client_set_recv_callback(doubao_client_t *client, recv_callback_t cb, void *userdata);
