@@ -1,0 +1,39 @@
+menu "Doubao AI Configuration"
+
+    config DOUBAO_APP_ID
+        string "Doubao App ID"
+        default ""
+        help
+            Application ID from Doubao (ByteDance) console.
+
+    config DOUBAO_ACCESS_KEY
+        string "Doubao Access Key"
+        default ""
+        help
+            Access key from Doubao (ByteDance) console.
+
+    config DOUBAO_APP_KEY
+        string "Doubao App Key"
+        default "PlgvMymc7f3tQnJ6"
+        help
+            App key for Doubao real-time dialog API.
+
+    config DOUBAO_TTS_SPEAKER
+        string "TTS Speaker Voice"
+        default "zh_female_vv_jupiter_bigtts"
+        help
+            TTS voice name for Doubao speech synthesis.
+
+    config WIFI_SSID
+        string "WiFi SSID"
+        default ""
+        help
+            SSID of the WiFi network to connect to.
+
+    config WIFI_PASSWORD
+        string "WiFi Password"
+        default ""
+        help
+            Password of the WiFi network.
+
+endmenu
