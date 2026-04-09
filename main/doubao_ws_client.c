@@ -164,7 +164,7 @@ static int send_command(doubao_ws_client_t *client, uint8_t *buf, size_t msg_len
         return -1;
     }
     int ret = esp_websocket_client_send_bin(client->ws_handle, (const char *)buf,
-                                             (int)msg_len, pdMS_TO_TICKS(5000));
+                                             (int)msg_len, pdMS_TO_TICKS(10000));
     free(buf);
     return (ret < 0) ? -1 : 0;
 }
@@ -291,8 +291,8 @@ int doubao_ws_connect(doubao_ws_client_t *client) {
     esp_websocket_client_config_t ws_cfg = {
         .uri = uri,
         .headers = headers,
-        .buffer_size = 8192,
-        .task_stack = 6144,
+        .buffer_size = 16384,
+        .task_stack = 8192,
         .reconnect_timeout_ms = 5000,
         .network_timeout_ms = 10000,
     };

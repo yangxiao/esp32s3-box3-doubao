@@ -260,10 +260,12 @@ static void audio_play_task(void *pvParameters) {
  */
 static void ws_tx_task(void *pvParameters) {
     const size_t frame_bytes = OPUS_ENC_FRAME_SIZE * sizeof(int16_t);
-    uint8_t opus_out[OPUS_ENC_MAX_OUT];
+    uint8_t *opus_out = heap_caps_malloc(OPUS_ENC_MAX_OUT, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     int16_t *pcm_frame = heap_caps_malloc(frame_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!pcm_frame) {
-        ESP_LOGE(TAG, "Failed to alloc TX PCM buffer");
+    if (!pcm_frame || !opus_out) {
+        ESP_LOGE(TAG, "Failed to alloc TX buffers");
+        free(pcm_frame);
+        free(opus_out);
         vTaskDelete(NULL);
         return;
     }
@@ -308,6 +310,7 @@ static void ws_tx_task(void *pvParameters) {
     }
 
     free(pcm_frame);
+    free(opus_out);
     vTaskDelete(NULL);
 }
 
@@ -364,18 +367,31 @@ static void main_fsm_task(void *pvParameters) {
         }
 
         case APP_STATE_HANDSHAKING: {
-            /* Protocol handshake sequence */
+            /* Protocol handshake sequence — wait for each command to complete
+             * before sending the next, to avoid WS mutex contention */
             ESP_LOGI(TAG, "Starting handshake...");
 
-            doubao_ws_start_connection(&g_ws_client);
-            vTaskDelay(pdMS_TO_TICKS(500));
+            if (doubao_ws_start_connection(&g_ws_client) != 0) {
+                ESP_LOGE(TAG, "StartConnection failed");
+                doubao_ws_destroy(&g_ws_client);
+                g_app_state = APP_STATE_IDLE;
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(1000));
 
-            doubao_ws_start_session(&g_ws_client);
-            vTaskDelay(pdMS_TO_TICKS(500));
+            if (doubao_ws_start_session(&g_ws_client) != 0) {
+                ESP_LOGE(TAG, "StartSession failed");
+                doubao_ws_destroy(&g_ws_client);
+                g_app_state = APP_STATE_IDLE;
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(1000));
 
             g_say_hello_done = false;
             g_session_active = true;
-            doubao_ws_say_hello(&g_ws_client);
+            if (doubao_ws_say_hello(&g_ws_client) != 0) {
+                ESP_LOGE(TAG, "SayHello failed");
+            }
 
             /* Wait for SayHello TTS to complete */
             int wait_count = 0;
@@ -487,9 +503,9 @@ void app_main(void) {
 
     /* WebSocket TX task on Core 0 */
     xTaskCreatePinnedToCore(ws_tx_task, "ws_tx",
-                            6144, NULL, 15, NULL, 0);
+                            8192, NULL, 15, NULL, 0);
 
     /* Main FSM task on Core 0 (ws_rx is handled by esp_websocket_client internally) */
     xTaskCreatePinnedToCore(main_fsm_task, "main_fsm",
-                            4096, NULL, 10, NULL, 0);
+                            6144, NULL, 10, NULL, 0);
 }
