@@ -8,6 +8,7 @@
 #include "esp_heap_caps.h"
 #include "esp_websocket_client.h"
 #include "esp_event.h"
+#include "esp_crt_bundle.h"
 
 static const char *TAG = "doubao_ws";
 
@@ -295,6 +296,7 @@ int doubao_ws_connect(doubao_ws_client_t *client) {
         .task_stack = 8192,
         .reconnect_timeout_ms = 5000,
         .network_timeout_ms = 10000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
     client->ws_handle = esp_websocket_client_init(&ws_cfg);
