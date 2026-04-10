@@ -128,18 +128,10 @@ uint8_t *gzip_decompress(const uint8_t *data, size_t data_len, size_t *out_len) 
         if (!out) return NULL;
     }
 
-    /* Decompress using tinfl */
+    /* Decompress using tinfl (raw deflate, no zlib header) */
     size_t decompressed_len = tinfl_decompress_mem_to_mem(
         out, buf_size,
-        deflate_data, deflate_len,
-        TINFL_FLAG_PARSE_ZLIB_HEADER | TINFL_FLAG_COMPUTE_ADLER32);
-
-    if (decompressed_len == TINFL_DECOMPRESS_MEM_TO_MEM_FAILED) {
-        /* Try without zlib header flag (raw deflate) */
-        decompressed_len = tinfl_decompress_mem_to_mem(
-            out, buf_size,
-            deflate_data, deflate_len, 0);
-    }
+        deflate_data, deflate_len, 0);
 
     if (decompressed_len == TINFL_DECOMPRESS_MEM_TO_MEM_FAILED) {
         ESP_LOGE(TAG, "tinfl decompress failed");

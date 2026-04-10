@@ -17,7 +17,7 @@
 
 /* Ring buffer sizes (allocated in PSRAM) */
 #define CAPTURE_RB_SIZE     (32 * 1024)   /* 32KB ~ 1s @ 16kHz/16bit/mono */
-#define PLAYBACK_RB_SIZE    (32 * 1024)   /* 32KB ~ 1s @ 16kHz/16bit/mono */
+#define PLAYBACK_RB_SIZE    (64 * 1024)   /* 64KB ~ 2s @ 16kHz/16bit/mono */
 
 /**
  * Initialize BSP board, I2S, and audio codec.

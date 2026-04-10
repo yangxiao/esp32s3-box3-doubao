@@ -15,9 +15,9 @@
 #define OPUS_ENC_MAX_OUT        4000
 
 /* Opus decoder config */
-#define OPUS_DEC_SAMPLE_RATE    48000
+#define OPUS_DEC_SAMPLE_RATE    16000
 #define OPUS_DEC_CHANNELS       1
-#define OPUS_DEC_MAX_FRAME      5760    /* max 120ms @ 48kHz */
+#define OPUS_DEC_MAX_FRAME      1920    /* max 120ms @ 16kHz */
 
 /* Callback for decoded PCM output */
 typedef void (*opus_pcm_output_cb_t)(const int16_t *pcm, size_t samples, void *userdata);
@@ -35,6 +35,9 @@ typedef struct {
     bool ogg_stream_inited;
     bool ogg_headers_parsed;
     int ogg_header_count;
+
+    /* Decode output buffer (heap-allocated to avoid stack overflow) */
+    int16_t *decode_buf;
 
     /* PCM output callback */
     opus_pcm_output_cb_t pcm_cb;

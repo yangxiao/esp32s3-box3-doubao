@@ -300,7 +300,7 @@ static void ws_tx_task(void *pvParameters) {
             if (accumulated >= frame_bytes) {
                 /* Encode and send */
                 int encoded = opus_proc_encode(&g_opus_proc, pcm_frame,
-                                                opus_out, sizeof(opus_out));
+                                                opus_out, OPUS_ENC_MAX_OUT);
                 if (encoded > 0) {
                     doubao_ws_send_audio(&g_ws_client, opus_out, (size_t)encoded);
                 }
