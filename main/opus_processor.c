@@ -37,6 +37,19 @@ int opus_proc_init(opus_processor_t *proc) {
     proc->ogg_headers_parsed = false;
     proc->ogg_header_count = 0;
 
+    /* Allocate decode buffer in PSRAM (too large for stack) */
+    proc->decode_buf = heap_caps_malloc(OPUS_DEC_MAX_FRAME * sizeof(int16_t),
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!proc->decode_buf) {
+        proc->decode_buf = malloc(OPUS_DEC_MAX_FRAME * sizeof(int16_t));
+        if (!proc->decode_buf) {
+            ESP_LOGE(TAG, "Failed to alloc decode buffer");
+            opus_decoder_destroy(proc->decoder);
+            opus_encoder_destroy(proc->encoder);
+            return -1;
+        }
+    }
+
     return 0;
 }
 
@@ -105,13 +118,12 @@ void opus_proc_decode_ogg(opus_processor_t *proc, const uint8_t *data, size_t le
             }
 
             /* Decode Opus packet to PCM */
-            int16_t pcm_out[OPUS_DEC_MAX_FRAME];
             int decoded = opus_decode(proc->decoder,
                                        packet.packet, (opus_int32)packet.bytes,
-                                       pcm_out, OPUS_DEC_MAX_FRAME, 0);
+                                       proc->decode_buf, OPUS_DEC_MAX_FRAME, 0);
             if (decoded > 0) {
                 if (proc->pcm_cb) {
-                    proc->pcm_cb(pcm_out, (size_t)decoded, proc->pcm_cb_userdata);
+                    proc->pcm_cb(proc->decode_buf, (size_t)decoded, proc->pcm_cb_userdata);
                 }
             } else if (decoded < 0) {
                 ESP_LOGE(TAG, "Opus decode error: %s", opus_strerror(decoded));
@@ -145,6 +157,8 @@ void opus_proc_cleanup(opus_processor_t *proc) {
         opus_decoder_destroy(proc->decoder);
         proc->decoder = NULL;
     }
+    free(proc->decode_buf);
+    proc->decode_buf = NULL;
     if (proc->ogg_stream_inited) {
         ogg_stream_clear(&proc->ogg_stream);
         proc->ogg_stream_inited = false;
