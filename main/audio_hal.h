@@ -11,13 +11,13 @@
 #define AUDIO_INPUT_CHANNELS        1
 #define AUDIO_INPUT_BITS            16
 
-#define AUDIO_OUTPUT_SAMPLE_RATE    48000
+#define AUDIO_OUTPUT_SAMPLE_RATE    16000
 #define AUDIO_OUTPUT_CHANNELS       1
 #define AUDIO_OUTPUT_BITS           16
 
 /* Ring buffer sizes (allocated in PSRAM) */
 #define CAPTURE_RB_SIZE     (32 * 1024)   /* 32KB ~ 1s @ 16kHz/16bit/mono */
-#define PLAYBACK_RB_SIZE    (64 * 1024)   /* 64KB ~ 0.67s @ 48kHz/16bit/mono */
+#define PLAYBACK_RB_SIZE    (32 * 1024)   /* 32KB ~ 1s @ 16kHz/16bit/mono */
 
 /**
  * Initialize BSP board, I2S, and audio codec.
