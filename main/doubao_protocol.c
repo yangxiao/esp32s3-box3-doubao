@@ -33,9 +33,10 @@ static uint32_t crc32_calc(const uint8_t *data, size_t len) {
 }
 
 uint8_t *gzip_compress(const uint8_t *data, size_t data_len, size_t *out_len) {
-    /* Gzip = 10-byte header + deflate stream + 8-byte trailer (CRC32 + size) */
+    /* Gzip = 12-byte header (10 + 2 FEXTRA) + deflate stream + 8-byte trailer
+     * Use low-level tdefl API + FEXTRA for alignment */
     size_t deflate_bound = data_len + (data_len / 1000) + 256;
-    size_t total_bound = 10 + deflate_bound + 8;
+    size_t total_bound = 12 + deflate_bound + 8;
 
     uint8_t *out = heap_caps_malloc(total_bound, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!out) {
@@ -43,42 +44,67 @@ uint8_t *gzip_compress(const uint8_t *data, size_t data_len, size_t *out_len) {
         if (!out) return NULL;
     }
 
-    /* Gzip header (10 bytes, minimal) */
+    /* Gzip header with FEXTRA (ensures deflate at out+12, 4-byte aligned) */
     out[0] = 0x1F;  /* magic */
     out[1] = 0x8B;  /* magic */
     out[2] = 0x08;  /* method: deflate */
-    out[3] = 0x00;  /* flags: none */
+    out[3] = 0x04;  /* flags: FEXTRA */
     out[4] = out[5] = out[6] = out[7] = 0x00;  /* mtime */
     out[8] = 0x00;  /* xfl */
     out[9] = 0xFF;  /* OS: unknown */
+    out[10] = 0x02; /* XLEN = 2 (little-endian) */
+    out[11] = 0x00;
 
-    /* Raw deflate compress using tdefl */
-    size_t compressed_len = tdefl_compress_mem_to_mem(
-        out + 10, deflate_bound,
-        data, data_len,
-        TDEFL_DEFAULT_MAX_PROBES);
-
-    if (compressed_len > 0 && compressed_len != (size_t)-1) {
-        /* Gzip trailer: CRC32 + original size (little-endian) */
-        size_t pos = 10 + compressed_len;
-        uint32_t crc = crc32_calc(data, data_len);
-        out[pos + 0] = (crc >>  0) & 0xFF;
-        out[pos + 1] = (crc >>  8) & 0xFF;
-        out[pos + 2] = (crc >> 16) & 0xFF;
-        out[pos + 3] = (crc >> 24) & 0xFF;
-        uint32_t isize = (uint32_t)(data_len & 0xFFFFFFFF);
-        out[pos + 4] = (isize >>  0) & 0xFF;
-        out[pos + 5] = (isize >>  8) & 0xFF;
-        out[pos + 6] = (isize >> 16) & 0xFF;
-        out[pos + 7] = (isize >> 24) & 0xFF;
-
-        *out_len = pos + 8;
-        return out;
+    /* Use low-level tdefl API (like ESP-ROM test_miniz.c does) */
+    tdefl_compressor *comp = malloc(sizeof(tdefl_compressor));
+    if (!comp) {
+        ESP_LOGE(TAG, "Failed to alloc tdefl_compressor");
+        free(out);
+        return NULL;
     }
 
-    ESP_LOGE(TAG, "tdefl_compress_mem_to_mem failed");
-    free(out);
-    return NULL;
+    /* Initialize compressor - raw deflate, no zlib header */
+    tdefl_status status = tdefl_init(comp, NULL, NULL, TDEFL_DEFAULT_MAX_PROBES);
+    if (status != TDEFL_STATUS_OKAY) {
+        ESP_LOGE(TAG, "tdefl_init failed: %d", status);
+        free(comp);
+        free(out);
+        return NULL;
+    }
+
+    /* Compress in one go with TDEFL_FINISH - out+12 is 4-byte aligned */
+    size_t in_bytes = data_len;
+    size_t out_bytes = deflate_bound;
+    const uint8_t *in_ptr = data;
+    uint8_t *out_ptr = out + 12;
+
+    status = tdefl_compress(comp, &in_ptr, &in_bytes, out_ptr, &out_bytes, TDEFL_FINISH);
+
+    if (status != TDEFL_STATUS_DONE || in_bytes != data_len) {
+        ESP_LOGE(TAG, "tdefl_compress failed: %d, in=%u/%u", status, (unsigned int)in_bytes, (unsigned int)data_len);
+        free(comp);
+        free(out);
+        return NULL;
+    }
+
+    size_t compressed_len = out_bytes;
+    free(comp);
+
+    /* Gzip trailer: CRC32 + original size (little-endian) */
+    size_t pos = 12 + compressed_len;
+    uint32_t crc = crc32_calc(data, data_len);
+    out[pos + 0] = (crc >>  0) & 0xFF;
+    out[pos + 1] = (crc >>  8) & 0xFF;
+    out[pos + 2] = (crc >> 16) & 0xFF;
+    out[pos + 3] = (crc >> 24) & 0xFF;
+    uint32_t isize = (uint32_t)(data_len & 0xFFFFFFFF);
+    out[pos + 4] = (isize >>  0) & 0xFF;
+    out[pos + 5] = (isize >>  8) & 0xFF;
+    out[pos + 6] = (isize >> 16) & 0xFF;
+    out[pos + 7] = (isize >> 24) & 0xFF;
+
+    *out_len = pos + 8;
+    return out;
 }
 
 uint8_t *gzip_decompress(const uint8_t *data, size_t data_len, size_t *out_len) {
@@ -128,10 +154,18 @@ uint8_t *gzip_decompress(const uint8_t *data, size_t data_len, size_t *out_len) 
         if (!out) return NULL;
     }
 
-    /* Decompress using tinfl (raw deflate, no zlib header) */
+    /* Decompress using tinfl */
     size_t decompressed_len = tinfl_decompress_mem_to_mem(
         out, buf_size,
-        deflate_data, deflate_len, 0);
+        deflate_data, deflate_len,
+        TINFL_FLAG_PARSE_ZLIB_HEADER | TINFL_FLAG_COMPUTE_ADLER32);
+
+    if (decompressed_len == TINFL_DECOMPRESS_MEM_TO_MEM_FAILED) {
+        /* Try without zlib header flag (raw deflate) */
+        decompressed_len = tinfl_decompress_mem_to_mem(
+            out, buf_size,
+            deflate_data, deflate_len, 0);
+    }
 
     if (decompressed_len == TINFL_DECOMPRESS_MEM_TO_MEM_FAILED) {
         ESP_LOGE(TAG, "tinfl decompress failed");
