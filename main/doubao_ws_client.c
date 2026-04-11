@@ -287,7 +287,8 @@ int doubao_ws_connect(doubao_ws_client_t *client) {
 
     /* Build URI */
     char uri[512];
-    snprintf(uri, sizeof(uri), "wss://%s:%d%s", WS_HOST, WS_PORT, WS_PATH);
+    //snprintf(uri, sizeof(uri), "wss://%s:%d%s", WS_HOST, WS_PORT, WS_PATH);
+    snprintf(uri, sizeof(uri), "wss://%s%s", WS_HOST, WS_PATH);
 
     esp_websocket_client_config_t ws_cfg = {
         .uri = uri,

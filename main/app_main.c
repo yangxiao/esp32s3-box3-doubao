@@ -1,5 +1,7 @@
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
+#include <sys/time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -9,6 +11,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_sntp.h"
 #include "nvs_flash.h"
 #include "esp_heap_caps.h"
 #include "driver/gpio.h"
@@ -56,6 +59,58 @@ static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_FAIL_BIT       BIT1
 static int s_retry_num = 0;
 #define WIFI_MAX_RETRY  5
+
+/* ---- Time Sync ---- */
+
+static void time_sync_notification_cb(struct timeval *tv)
+{
+    ESP_LOGI(TAG, "Time synchronized");
+}
+
+static int initialize_sntp(void)
+{
+    ESP_LOGI(TAG, "Initializing SNTP");
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_setservername(1, "ntp.aliyun.com");
+    esp_sntp_set_time_sync_notification_cb(time_sync_notification_cb);
+    esp_sntp_init();
+    return 0;
+}
+
+static int sync_system_time(void)
+{
+    initialize_sntp();
+
+    /* Wait for time to be set */
+    time_t now = 0;
+    struct tm timeinfo = { 0 };
+    int retry = 0;
+    const int retry_count = 15;
+    while (esp_sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && ++retry < retry_count) {
+        ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+
+    time(&now);
+    localtime_r(&now, &timeinfo);
+
+    if (timeinfo.tm_year < (2016 - 1900)) {
+        ESP_LOGE(TAG, "Time not synchronized yet");
+        return -1;
+    }
+
+    /* Set timezone to Beijing (UTC+8) */
+    setenv("TZ", "CST-8", 1);
+    tzset();
+
+    char strftime_buf[64];
+    localtime_r(&now, &timeinfo);
+    strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
+    ESP_LOGI(TAG, "Current time in Beijing: %s", strftime_buf);
+
+    return 0;
+}
 
 /* ---- WiFi ---- */
 
@@ -463,6 +518,12 @@ void app_main(void) {
         ESP_LOGE(TAG, "WiFi init failed, restarting...");
         vTaskDelay(pdMS_TO_TICKS(3000));
         esp_restart();
+    }
+
+    /* Sync system time to Beijing time */
+    ESP_LOGI(TAG, "Syncing system time to Beijing time...");
+    if (sync_system_time() != 0) {
+        ESP_LOGW(TAG, "Time sync failed, continuing anyway...");
     }
 
     /* Initialize button GPIO (active low with internal pull-up) */
