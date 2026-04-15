@@ -14,5 +14,6 @@ idf_component_register(
         nvs_flash
         esp_psram
         esp_rom
+        esp_ringbuf
         driver
 )
