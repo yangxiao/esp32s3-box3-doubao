@@ -2,13 +2,13 @@ menu "Doubao AI Configuration"
 
     config DOUBAO_APP_ID
         string "Doubao App ID"
-        default ""
+        default "5639366393"
         help
             Application ID from Doubao (ByteDance) console.
 
     config DOUBAO_ACCESS_KEY
         string "Doubao Access Key"
-        default ""
+        default "gIuNcVfuAMugvNCxktm_Oi-qM4GYVxsB"
         help
             Access key from Doubao (ByteDance) console.
 
@@ -26,13 +26,13 @@ menu "Doubao AI Configuration"
 
     config WIFI_SSID
         string "WiFi SSID"
-        default ""
+        default "diluke_merlin"
         help
             SSID of the WiFi network to connect to.
 
     config WIFI_PASSWORD
         string "WiFi Password"
-        default ""
+        default "19851201"
         help
             Password of the WiFi network.
 

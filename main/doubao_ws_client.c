@@ -55,12 +55,12 @@ static int build_start_session_json(char *json_buf, size_t json_buf_size,
                     "\"sample_rate\":16000,"
                     "\"channel\":1"
                 "},"
-                "\"extra\":{\"end_smooth_window_ms\":1500}"
+                "\"extra\":{\"end_smooth_window_ms\":500}"
             "},",
             config->asr_audio_format);
     } else {
         snprintf(asr_block, sizeof(asr_block),
-            "\"asr\":{\"extra\":{\"end_smooth_window_ms\":1500}},");
+            "\"asr\":{\"extra\":{\"end_smooth_window_ms\":500}},");
     }
 
     return snprintf(json_buf, json_buf_size,
@@ -103,18 +103,19 @@ static uint8_t *build_command(uint8_t msg_type, uint8_t flags, uint8_t serial,
                               const char *session_id,
                               const uint8_t *payload, size_t payload_len,
                               bool include_session, size_t *out_len) {
-    /* Compress payload if needed */
+    /* Force no compression - gzip keeps crashing */
     uint8_t *compressed = NULL;
     size_t compressed_len = 0;
-    if (compress == COMPRESS_GZIP && payload && payload_len > 0) {
-        compressed = gzip_compress(payload, payload_len, &compressed_len);
-        if (!compressed) return NULL;
-    } else if (payload && payload_len > 0) {
+    if (payload && payload_len > 0) {
         compressed_len = payload_len;
-        compressed = malloc(payload_len);
-        if (!compressed) return NULL;
+        compressed = heap_caps_malloc(payload_len, MALLOC_CAP_SPIRAM);
+        if (!compressed) {
+            compressed = malloc(payload_len);
+            if (!compressed) return NULL;
+        }
         memcpy(compressed, payload, payload_len);
     }
+    compress = COMPRESS_NONE;
 
     size_t sid_len = session_id ? strlen(session_id) : 0;
     size_t total = 4;           /* header */
@@ -285,30 +286,20 @@ void doubao_ws_set_recv_callback(doubao_ws_client_t *client,
 }
 
 int doubao_ws_connect(doubao_ws_client_t *client) {
-    /* Build custom headers string */
-    char headers[1024];
-    snprintf(headers, sizeof(headers),
-        "X-Api-App-ID: %s\r\n"
-        "X-Api-Access-Key: %s\r\n"
-        "X-Api-Resource-Id: %s\r\n"
-        "X-Api-App-Key: %s\r\n"
-        "X-Api-Connect-Id: %s\r\n",
-        client->config.app_id,
-        client->config.access_key,
-        client->config.resource_id ? client->config.resource_id : WS_RESOURCE_ID,
-        client->config.app_key ? client->config.app_key : "PlgvMymc7f3tQnJ6",
-        client->connect_id);
-
     /* Build URI */
     char uri[512];
     //snprintf(uri, sizeof(uri), "wss://%s:%d%s", WS_HOST, WS_PORT, WS_PATH);
     snprintf(uri, sizeof(uri), "wss://%s%s", WS_HOST, WS_PATH);
 
+    ESP_LOGI(TAG, "URI: %s", uri);
+    ESP_LOGI(TAG, "App ID length: %d", (int)strlen(client->config.app_id));
+    ESP_LOGI(TAG, "Access Key length: %d", (int)strlen(client->config.access_key));
+    ESP_LOGI(TAG, "Connect ID: %s", client->connect_id);
+
     esp_websocket_client_config_t ws_cfg = {
         .uri = uri,
-        .headers = headers,
-        .buffer_size = 16384,
-        .task_stack = 8192,
+        .buffer_size = 32768,
+        .task_stack = 16384,
         .reconnect_timeout_ms = 5000,
         .network_timeout_ms = 10000,
         .crt_bundle_attach = esp_crt_bundle_attach,
@@ -319,6 +310,17 @@ int doubao_ws_connect(doubao_ws_client_t *client) {
         ESP_LOGE(TAG, "Failed to init WebSocket client");
         return -1;
     }
+
+    /* Append headers one by one */
+    ESP_LOGI(TAG, "Appending headers...");
+    esp_websocket_client_append_header(client->ws_handle, "X-Api-App-ID", client->config.app_id);
+    esp_websocket_client_append_header(client->ws_handle, "X-Api-Access-Key", client->config.access_key);
+    esp_websocket_client_append_header(client->ws_handle, "X-Api-Resource-Id",
+                                        client->config.resource_id ? client->config.resource_id : WS_RESOURCE_ID);
+    esp_websocket_client_append_header(client->ws_handle, "X-Api-App-Key",
+                                        client->config.app_key ? client->config.app_key : "PlgvMymc7f3tQnJ6");
+    esp_websocket_client_append_header(client->ws_handle, "X-Api-Connect-Id", client->connect_id);
+    ESP_LOGI(TAG, "Headers appended");
 
     esp_websocket_register_events(client->ws_handle, WEBSOCKET_EVENT_ANY,
                                    ws_event_handler, client);
@@ -389,9 +391,10 @@ int doubao_ws_say_hello(doubao_ws_client_t *client) {
     return send_command(client, buf, msg_len);
 }
 
-int doubao_ws_send_audio(doubao_ws_client_t *client, const uint8_t *opus_data, size_t len) {
+int doubao_ws_send_audio(doubao_ws_client_t *client, const uint8_t *audio_data, size_t len) {
+    /* Use gzip compression for raw PCM, no compression for Opus */
     bool use_opus = (client->config.asr_audio_format &&
-                     strlen(client->config.asr_audio_format) > 0);
+                     strcmp(client->config.asr_audio_format, "ogg_opus") == 0);
     uint8_t compress = use_opus ? COMPRESS_NONE : COMPRESS_GZIP;
 
     size_t msg_len;
@@ -399,7 +402,7 @@ int doubao_ws_send_audio(doubao_ws_client_t *client, const uint8_t *opus_data, s
         MSG_CLIENT_AUDIO_ONLY, FLAG_MSG_WITH_EVENT,
         SERIAL_NONE, compress,
         CMD_TASK_REQUEST, client->session_id,
-        opus_data, len,
+        audio_data, len,
         true, &msg_len);
     return send_command(client, buf, msg_len);
 }
@@ -436,13 +439,25 @@ bool doubao_ws_is_connected(doubao_ws_client_t *client) {
 
 void doubao_ws_destroy(doubao_ws_client_t *client) {
     client->running = false;
+    client->connected = false;
+
+    /* First set all bits to wake any waiting tasks */
+    if (client->event_group) {
+        xEventGroupSetBits(client->event_group, WS_EVENT_CONNECTED | WS_EVENT_DISCONNECTED | WS_EVENT_DATA_RECEIVED);
+    }
+
     if (client->ws_handle) {
         esp_websocket_client_stop(client->ws_handle);
         esp_websocket_client_destroy(client->ws_handle);
         client->ws_handle = NULL;
     }
+
     free(client->recv_buf);
     client->recv_buf = NULL;
+
+    /* Delay a little to ensure no tasks are accessing the event group */
+    vTaskDelay(pdMS_TO_TICKS(10));
+
     if (client->event_group) {
         vEventGroupDelete(client->event_group);
         client->event_group = NULL;

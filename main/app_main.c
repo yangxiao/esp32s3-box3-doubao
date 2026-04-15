@@ -182,8 +182,12 @@ static int wifi_init_sta(void) {
 /* ---- WebSocket receive callback ---- */
 
 static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
+    ESP_LOGI(TAG, "WS recv: msg_type=%d, has_event=%d, event=%d, is_binary=%d, payload_len=%d",
+             resp->message_type, resp->has_event, resp->event, resp->is_binary, (int)resp->payload_data_len);
+
     if (resp->message_type == MSG_SERVER_ACK && resp->is_binary && resp->payload_data) {
         /* OGG/Opus audio data from TTS */
+        ESP_LOGD(TAG, "Received TTS audio: %d bytes", (int)resp->payload_data_len);
         opus_proc_decode_ogg(&g_opus_proc, resp->payload_data, resp->payload_data_len);
 
     } else if (resp->message_type == MSG_SERVER_FULL_RESPONSE) {
@@ -192,19 +196,77 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
         }
 
         if (resp->has_event) {
+            ESP_LOGI(TAG, "Received event: %d", resp->event);
             switch (resp->event) {
+            case 50:
+                ESP_LOGI(TAG, "Event 50: connection started");
+                break;
+
+            case 150:
+                ESP_LOGI(TAG, "Event 150: session started");
+                if (resp->payload_data && !resp->is_binary) {
+                    ESP_LOGI(TAG, "Session info: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
+                }
+                break;
+
+            case 154:
+                ESP_LOGI(TAG, "Event 154: usage stats");
+                if (resp->payload_data && !resp->is_binary) {
+                    ESP_LOGI(TAG, "Usage: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
+                }
+                break;
+
+            case 350:
+                ESP_LOGI(TAG, "Event 350: TTS text available");
+                if (resp->payload_data && !resp->is_binary) {
+                    ESP_LOGI(TAG, "TTS text: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
+                }
+                break;
+
+            case 351:
+                ESP_LOGI(TAG, "Event 351: TTS text complete");
+                break;
+
+            case 352:
+                /* TTS audio data - handled by msg_type=11 check above */
+                break;
+
+            case 451:
+                /* ASR interim result - just log it */
+                ESP_LOGD(TAG, "Event 451: ASR interim result");
+                if (resp->payload_data && !resp->is_binary) {
+                    ESP_LOGD(TAG, "ASR: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
+                }
+                break;
+
             case EVENT_CLEAR_CACHE:
                 ESP_LOGI(TAG, "Event 450: clear audio cache");
                 audio_hal_clear_playback();
+                audio_hal_clear_capture();
                 opus_proc_reset_ogg(&g_opus_proc);
                 g_user_querying = true;
                 g_app_state = APP_STATE_LISTENING;
+                ESP_LOGI(TAG, "State changed to LISTENING (EVENT_CLEAR_CACHE), buffers cleared");
                 break;
 
             case EVENT_USER_QUERY_END:
                 ESP_LOGI(TAG, "Event 459: user query end");
                 g_user_querying = false;
                 g_app_state = APP_STATE_SPEAKING;
+                audio_hal_clear_capture();
+                ESP_LOGI(TAG, "State changed to SPEAKING, capture buffer cleared");
+                break;
+
+            case 550:
+                ESP_LOGI(TAG, "Event 550: dialogue text update");
+                if (resp->payload_data && !resp->is_binary) {
+                    ESP_LOGI(TAG, "Reply: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
+                }
+                break;
+
+            case 559:
+                ESP_LOGI(TAG, "Event 559: dialogue turn complete");
+                /* This event indicates the turn is complete, we'll wait for TTS_ENDED */
                 break;
 
             case EVENT_TTS_ENDED:
@@ -212,7 +274,13 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                 if (!g_say_hello_done) {
                     g_say_hello_done = true;
                 }
+                /* Always go back to LISTENING after TTS ends, clear buffers */
+                audio_hal_clear_playback();
+                audio_hal_clear_capture();
+                opus_proc_reset_ogg(&g_opus_proc);
+                g_user_querying = true;
                 g_app_state = APP_STATE_LISTENING;
+                ESP_LOGI(TAG, "State changed to LISTENING (TTS ended), all buffers cleared");
                 break;
 
             case EVENT_SESSION_FINISH_1:
@@ -220,10 +288,14 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                 ESP_LOGI(TAG, "Event %d: session finished", resp->event);
                 g_session_active = false;
                 g_app_state = APP_STATE_IDLE;
+                ESP_LOGI(TAG, "State changed to IDLE");
                 break;
 
             default:
-                ESP_LOGD(TAG, "Event %d (unhandled)", resp->event);
+                ESP_LOGI(TAG, "Event %d (unhandled)", resp->event);
+                if (resp->payload_data && !resp->is_binary) {
+                    ESP_LOGI(TAG, "Payload: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
+                }
                 break;
             }
         }
@@ -243,8 +315,8 @@ static void on_decoded_pcm(const int16_t *pcm, size_t samples, void *userdata) {
     RingbufHandle_t playback_rb = audio_hal_get_playback_rb();
     if (playback_rb) {
         size_t bytes = samples * sizeof(int16_t);
-        /* Non-blocking write; drop if buffer full */
-        if (xRingbufferSend(playback_rb, pcm, bytes, pdMS_TO_TICKS(50)) != pdTRUE) {
+        /* Blocking write with longer timeout to avoid dropping data */
+        if (xRingbufferSend(playback_rb, pcm, bytes, pdMS_TO_TICKS(500)) != pdTRUE) {
             ESP_LOGW(TAG, "Playback buffer full, dropping %d samples", (int)samples);
         }
     }
@@ -266,9 +338,10 @@ static void audio_capture_task(void *pvParameters) {
     }
 
     RingbufHandle_t capture_rb = audio_hal_get_capture_rb();
+    static uint32_t capture_log_counter = 0;
 
     while (g_running) {
-        if (g_app_state != APP_STATE_LISTENING && g_app_state != APP_STATE_SPEAKING) {
+        if (g_app_state != APP_STATE_LISTENING) {
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
@@ -277,6 +350,9 @@ static void audio_capture_task(void *pvParameters) {
         if (read > 0 && capture_rb) {
             if (xRingbufferSend(capture_rb, pcm_buf, read, pdMS_TO_TICKS(10)) != pdTRUE) {
                 ESP_LOGW(TAG, "Capture buffer full");
+            }
+            if (capture_log_counter++ % 100 == 0) {
+                ESP_LOGI(TAG, "Captured %d bytes, state=%d", read, g_app_state);
             }
         }
     }
@@ -311,28 +387,32 @@ static void audio_play_task(void *pvParameters) {
 
 /**
  * WebSocket TX Task (Core 0, Priority 15)
- * Reads PCM from capture ring buffer → Opus encode → send via WebSocket
+ * Reads PCM from capture ring buffer → send raw PCM via WebSocket
  */
 static void ws_tx_task(void *pvParameters) {
-    const size_t frame_bytes = OPUS_ENC_FRAME_SIZE * sizeof(int16_t);
-    uint8_t *opus_out = heap_caps_malloc(OPUS_ENC_MAX_OUT, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    int16_t *pcm_frame = heap_caps_malloc(frame_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!pcm_frame || !opus_out) {
-        ESP_LOGE(TAG, "Failed to alloc TX buffers");
-        free(pcm_frame);
-        free(opus_out);
+    /* Send in 320-sample chunks (20ms @ 16kHz) */
+    const size_t chunk_bytes = 320 * sizeof(int16_t);
+    int16_t *pcm_chunk = heap_caps_malloc(chunk_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!pcm_chunk) {
+        ESP_LOGE(TAG, "Failed to alloc TX buffer");
         vTaskDelete(NULL);
         return;
     }
 
     RingbufHandle_t capture_rb = audio_hal_get_capture_rb();
     size_t accumulated = 0;
+    static uint32_t tx_log_counter = 0;
+    static uint32_t state_log_counter = 0;
 
     while (g_running) {
-        if (g_app_state != APP_STATE_LISTENING && g_app_state != APP_STATE_SPEAKING) {
+        if (g_app_state != APP_STATE_LISTENING) {
             vTaskDelay(pdMS_TO_TICKS(50));
             accumulated = 0;
             continue;
+        }
+
+        if (state_log_counter++ % 200 == 0) {
+            ESP_LOGI(TAG, "ws_tx_task: LISTENING state, connected=%d", doubao_ws_is_connected(&g_ws_client));
         }
 
         if (!capture_rb || !doubao_ws_is_connected(&g_ws_client)) {
@@ -340,32 +420,32 @@ static void ws_tx_task(void *pvParameters) {
             continue;
         }
 
-        /* Accumulate exactly one Opus frame worth of PCM */
+        /* Accumulate a chunk of PCM */
         size_t item_size;
         void *item = xRingbufferReceive(capture_rb, &item_size, pdMS_TO_TICKS(60));
         if (item) {
             size_t to_copy = item_size;
-            if (accumulated + to_copy > frame_bytes) {
-                to_copy = frame_bytes - accumulated;
+            if (accumulated + to_copy > chunk_bytes) {
+                to_copy = chunk_bytes - accumulated;
             }
-            memcpy((uint8_t *)pcm_frame + accumulated, item, to_copy);
+            memcpy((uint8_t *)pcm_chunk + accumulated, item, to_copy);
             accumulated += to_copy;
             vRingbufferReturnItem(capture_rb, item);
 
-            if (accumulated >= frame_bytes) {
-                /* Encode and send */
-                int encoded = opus_proc_encode(&g_opus_proc, pcm_frame,
-                                                opus_out, OPUS_ENC_MAX_OUT);
-                if (encoded > 0) {
-                    doubao_ws_send_audio(&g_ws_client, opus_out, (size_t)encoded);
+            if (accumulated >= chunk_bytes) {
+                /* Send raw PCM only if still in LISTENING state */
+                if (g_app_state == APP_STATE_LISTENING) {
+                    doubao_ws_send_audio(&g_ws_client, (const uint8_t *)pcm_chunk, accumulated);
+                    if (tx_log_counter++ % 50 == 0) {
+                        ESP_LOGI(TAG, "Sent audio chunk: %d bytes", (int)accumulated);
+                    }
                 }
                 accumulated = 0;
             }
         }
     }
 
-    free(pcm_frame);
-    free(opus_out);
+    free(pcm_chunk);
     vTaskDelete(NULL);
 }
 
@@ -376,7 +456,11 @@ static void ws_tx_task(void *pvParameters) {
 static void main_fsm_task(void *pvParameters) {
     ESP_LOGI(TAG, "FSM task started, waiting for button press...");
 
+    static uint32_t state_log_counter = 0;
     while (g_running) {
+        if (state_log_counter++ % 200 == 0) {
+            ESP_LOGI(TAG, "FSM state: %d, session_active=%d", g_app_state, g_session_active);
+        }
         switch (g_app_state) {
         case APP_STATE_IDLE:
             /* Phase 1: check button press to start session */
@@ -398,7 +482,7 @@ static void main_fsm_task(void *pvParameters) {
                 .resource_id = "volc.speech.dialog",
                 .tts_speaker = CONFIG_DOUBAO_TTS_SPEAKER,
                 .input_mod = "audio",
-                .asr_audio_format = "speech_opus",
+                .asr_audio_format = NULL, /* Raw PCM, simplest and most stable */
                 .recv_timeout = 10,
             };
 
@@ -558,15 +642,15 @@ void app_main(void) {
 
     /* Audio tasks on Core 1 */
     xTaskCreatePinnedToCore(audio_capture_task, "audio_cap",
-                            8192, NULL, 22, NULL, 1);
+                            32768, NULL, 22, NULL, 1);
     xTaskCreatePinnedToCore(audio_play_task, "audio_play",
-                            8192, NULL, 21, NULL, 1);
+                            16384, NULL, 21, NULL, 1);
 
-    /* WebSocket TX task on Core 0 */
+    /* WebSocket TX task on Core 0 - LARGE STACK to avoid crashes */
     xTaskCreatePinnedToCore(ws_tx_task, "ws_tx",
-                            8192, NULL, 15, NULL, 0);
+                            32768, NULL, 15, NULL, 0);
 
     /* Main FSM task on Core 0 (ws_rx is handled by esp_websocket_client internally) */
     xTaskCreatePinnedToCore(main_fsm_task, "main_fsm",
-                            6144, NULL, 10, NULL, 0);
+                            8192, NULL, 10, NULL, 0);
 }

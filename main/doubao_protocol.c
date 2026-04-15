@@ -34,8 +34,11 @@ static uint32_t crc32_calc(const uint8_t *data, size_t len) {
 }
 
 uint8_t *gzip_compress(const uint8_t *data, size_t data_len, size_t *out_len) {
+    ESP_LOGI(TAG, "gzip_compress: data_len=%u", (unsigned int)data_len);
+
     /* Special case for "{}" - use pre-computed compressed data to avoid Stored Block */
     if (data_len == 2 && data[0] == '{' && data[1] == '}') {
+        ESP_LOGI(TAG, "gzip_compress: using precomputed for {}");
         /* Pre-computed gzip for "{}":
          * - gzip header (10 bytes)
          * - deflate: fixed huffman block with "{}" (not stored block)
@@ -61,18 +64,25 @@ uint8_t *gzip_compress(const uint8_t *data, size_t data_len, size_t *out_len) {
         out[6] = (uint8_t)((mtime >> 16) & 0xFF);
         out[7] = (uint8_t)((mtime >> 24) & 0xFF);
         *out_len = precomp_len;
+        ESP_LOGI(TAG, "gzip_compress: precomputed done, out_len=%u", (unsigned int)*out_len);
         return out;
     }
+
+    ESP_LOGI(TAG, "gzip_compress: using low-level tdefl API");
 
     /* Gzip = 10-byte header + deflate stream + 8-byte trailer
      * Use low-level tdefl API to avoid alignment issues */
     size_t deflate_bound = data_len + (data_len / 1000) + 256;
     size_t total_bound = 10 + deflate_bound + 8;
 
+    ESP_LOGI(TAG, "gzip_compress: allocating %u bytes", (unsigned int)total_bound);
     uint8_t *out = heap_caps_malloc(total_bound, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!out) {
         out = malloc(total_bound);
-        if (!out) return NULL;
+        if (!out) {
+            ESP_LOGE(TAG, "Failed to alloc output buffer");
+            return NULL;
+        }
     }
 
     time_t now;
@@ -90,15 +100,20 @@ uint8_t *gzip_compress(const uint8_t *data, size_t data_len, size_t *out_len) {
     out[8] = 0x02;  /* xfl */
     out[9] = 0xFF;  /* OS: unknown */
 
-    /* Use low-level tdefl API */
-    tdefl_compressor *comp = malloc(sizeof(tdefl_compressor));
+    ESP_LOGI(TAG, "gzip_compress: allocating tdefl_compressor on heap");
+    /* Use heap for compressor to avoid stack overflow */
+    tdefl_compressor *comp = (tdefl_compressor *)heap_caps_malloc(sizeof(tdefl_compressor), MALLOC_CAP_SPIRAM);
     if (!comp) {
-        ESP_LOGE(TAG, "Failed to alloc tdefl_compressor");
-        free(out);
-        return NULL;
+        comp = (tdefl_compressor *)malloc(sizeof(tdefl_compressor));
+        if (!comp) {
+            ESP_LOGE(TAG, "Failed to alloc tdefl_compressor");
+            free(out);
+            return NULL;
+        }
     }
 
     /* Initialize compressor with compression level 6 (default) */
+    ESP_LOGI(TAG, "gzip_compress: calling tdefl_init");
     tdefl_status status = tdefl_init(comp, NULL, NULL, TDEFL_DEFAULT_MAX_PROBES);
     if (status != TDEFL_STATUS_OKAY) {
         ESP_LOGE(TAG, "tdefl_init failed: %d", status);
@@ -108,6 +123,7 @@ uint8_t *gzip_compress(const uint8_t *data, size_t data_len, size_t *out_len) {
     }
 
     /* Compress in one go with TDEFL_FINISH */
+    ESP_LOGI(TAG, "gzip_compress: calling tdefl_compress");
     size_t in_bytes = data_len;
     size_t out_bytes = deflate_bound;
     const uint8_t *in_ptr = data;
@@ -122,8 +138,10 @@ uint8_t *gzip_compress(const uint8_t *data, size_t data_len, size_t *out_len) {
         return NULL;
     }
 
-    size_t compressed_len = out_bytes;
     free(comp);
+
+    ESP_LOGI(TAG, "gzip_compress: compressed %u -> %u bytes", (unsigned int)data_len, (unsigned int)out_bytes);
+    size_t compressed_len = out_bytes;
 
     /* Gzip trailer: CRC32 + original size (little-endian) */
     size_t pos = 10 + compressed_len;
@@ -139,6 +157,7 @@ uint8_t *gzip_compress(const uint8_t *data, size_t data_len, size_t *out_len) {
     out[pos + 7] = (isize >> 24) & 0xFF;
 
     *out_len = pos + 8;
+    ESP_LOGI(TAG, "gzip_compress: done, out_len=%u", (unsigned int)*out_len);
     return out;
 }
 

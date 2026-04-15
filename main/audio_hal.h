@@ -17,7 +17,7 @@
 
 /* Ring buffer sizes (allocated in PSRAM) */
 #define CAPTURE_RB_SIZE     (32 * 1024)   /* 32KB ~ 1s @ 16kHz/16bit/mono */
-#define PLAYBACK_RB_SIZE    (64 * 1024)   /* 64KB ~ 2s @ 16kHz/16bit/mono */
+#define PLAYBACK_RB_SIZE    (128 * 1024)  /* 128KB ~ 4s @ 16kHz/16bit/mono */
 
 /**
  * Initialize BSP board, I2S, and audio codec.
@@ -51,6 +51,11 @@ int audio_hal_write(const int16_t *buf, size_t bytes, TickType_t timeout);
  * Clear playback buffer (for barge-in / interrupt).
  */
 void audio_hal_clear_playback(void);
+
+/**
+ * Clear capture buffer.
+ */
+void audio_hal_clear_capture(void);
 
 /**
  * Deinitialize audio hardware.
