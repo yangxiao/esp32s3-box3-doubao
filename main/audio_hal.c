@@ -81,7 +81,7 @@ int audio_hal_init(void) {
         ESP_LOGE(TAG, "Failed to open microphone: %s", esp_err_to_name(err));
         return -1;
     }
-    esp_codec_dev_set_in_gain(rec_dev, 30.0);
+    esp_codec_dev_set_in_gain(rec_dev, 48.0);
     ESP_LOGI(TAG, "Microphone: %dHz, %dch, %dbit",
              AUDIO_INPUT_SAMPLE_RATE, AUDIO_INPUT_CHANNELS, AUDIO_INPUT_BITS);
 
@@ -152,6 +152,16 @@ void audio_hal_clear_playback(void) {
         vRingbufferReturnItem(playback_rb, item);
     }
     ESP_LOGI(TAG, "Playback buffer cleared");
+}
+
+void audio_hal_clear_capture(void) {
+    if (!capture_rb) return;
+    size_t item_size;
+    void *item;
+    while ((item = xRingbufferReceive(capture_rb, &item_size, 0)) != NULL) {
+        vRingbufferReturnItem(capture_rb, item);
+    }
+    ESP_LOGI(TAG, "Capture buffer cleared");
 }
 
 void audio_hal_deinit(void) {
