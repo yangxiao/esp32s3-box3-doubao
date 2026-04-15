@@ -217,44 +217,15 @@ static void ws_event_handler(void *handler_args, esp_event_base_t base,
             if (data->payload_offset + data->data_len >= data->payload_len) {
                 /* Complete message received */
                 if (client->on_recv && client->recv_buf_len > 0) {
-                    uint8_t *parse_ptr = client->recv_buf;
-                    size_t parse_len = client->recv_buf_len;
-
-                    /*
-                     * During handshake, the server may return HTTP headers
-                     * mixed with protocol data. The HTTP headers end with
-                     * "\r\n\r\n". Detect and skip past them so that
-                     * protocol_parse_response sees only the binary frame.
-                     */
-                    if (parse_len > 4) {
-                        uint8_t ver = parse_ptr[0] >> 4;
-                        if (ver != PROTOCOL_VERSION) {
-                            /* Not a valid protocol frame — likely HTTP headers */
-                            for (size_t i = 0; i + 3 < parse_len; i++) {
-                                if (parse_ptr[i]   == '\r' && parse_ptr[i+1] == '\n' &&
-                                    parse_ptr[i+2] == '\r' && parse_ptr[i+3] == '\n') {
-                                    size_t skip = i + 4;
-                                    ESP_LOGW(TAG, "Skipping %d bytes of HTTP headers in recv buffer",
-                                             (int)skip);
-                                    parse_ptr += skip;
-                                    parse_len -= skip;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    if (parse_len > 0) {
-                        parsed_response_t resp;
-                        if (protocol_parse_response(parse_ptr, parse_len, &resp) == 0) {
-                            client->on_recv(&resp, client->recv_userdata);
-                            free(resp.payload_data);
-                        } else {
-                            ESP_LOGE(TAG, "Failed to parse response (%d bytes, first=0x%02X)",
-                                     (int)parse_len, parse_ptr[0]);
-                            ESP_LOG_BUFFER_HEX_LEVEL(TAG, parse_ptr,
-                                     parse_len < 32 ? parse_len : 32, ESP_LOG_DEBUG);
-                        }
+                    parsed_response_t resp;
+                    if (protocol_parse_response(client->recv_buf, client->recv_buf_len, &resp) == 0) {
+                        client->on_recv(&resp, client->recv_userdata);
+                        free(resp.payload_data);
+                    } else {
+                        ESP_LOGE(TAG, "Failed to parse response (%d bytes, first=0x%02X)",
+                                 (int)client->recv_buf_len, client->recv_buf[0]);
+                        ESP_LOG_BUFFER_HEX_LEVEL(TAG, client->recv_buf,
+                                 client->recv_buf_len < 32 ? client->recv_buf_len : 32, ESP_LOG_DEBUG);
                     }
                 }
                 client->recv_buf_len = 0;
