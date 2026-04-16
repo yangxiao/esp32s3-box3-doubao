@@ -89,7 +89,7 @@ int ui_lcd_init(void) {
     lv_obj_set_scrollbar_mode(hint_bar, LV_SCROLLBAR_MODE_OFF);
 
     lbl_hint = lv_label_create(hint_bar);
-    lv_label_set_text(lbl_hint, "Say \"nihaoxiaozhi\" or press button");
+    lv_label_set_text(lbl_hint, "Say \"hi, jason\" or press button");
     lv_obj_set_style_text_color(lbl_hint, COLOR_HINT_TEXT, 0);
     lv_obj_set_style_text_font(lbl_hint, &lv_font_montserrat_12, 0);
     lv_obj_center(lbl_hint);
