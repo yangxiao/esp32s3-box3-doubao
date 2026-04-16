@@ -15,6 +15,7 @@
 #include "nvs_flash.h"
 #include "esp_heap_caps.h"
 #include "driver/gpio.h"
+#include "cJSON.h"
 
 #include "bsp/esp-bsp.h"
 
@@ -22,6 +23,8 @@
 #include "doubao_ws_client.h"
 #include "audio_hal.h"
 #include "opus_processor.h"
+#include "afe_handler.h"
+#include "ui_lcd.h"
 
 static const char *TAG = "app_main";
 
@@ -45,6 +48,7 @@ static volatile bool g_running = true;
 static volatile bool g_session_active = false;
 static volatile bool g_say_hello_done = false;
 static volatile bool g_user_querying = false;
+static volatile bool g_bargein_requested = false;  /* Phase 2: barge-in flag */
 
 /* Button GPIO (BOX-3 BOOT/CONFIG button is GPIO0, active low) */
 #define BUTTON_GPIO  BSP_BUTTON_CONFIG_IO
@@ -59,6 +63,23 @@ static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_FAIL_BIT       BIT1
 static int s_retry_num = 0;
 #define WIFI_MAX_RETRY  5
+
+/* ---- Helper: set state with UI update ---- */
+
+static void set_app_state(app_state_t new_state) {
+    g_app_state = new_state;
+    const char *label;
+    switch (new_state) {
+    case APP_STATE_IDLE:        label = "Idle";        break;
+    case APP_STATE_CONNECTING:  label = "Connecting";  break;
+    case APP_STATE_HANDSHAKING: label = "Handshaking"; break;
+    case APP_STATE_LISTENING:   label = "Listening";   break;
+    case APP_STATE_SPEAKING:    label = "Speaking";    break;
+    default:                    label = "Unknown";     break;
+    }
+    ui_lcd_set_state(label);
+    ESP_LOGI(TAG, "State -> %s", label);
+}
 
 /* ---- Time Sync ---- */
 
@@ -179,6 +200,26 @@ static int wifi_init_sta(void) {
     }
 }
 
+/* ---- Wake word callback (called from afe_fetch_task context) ---- */
+
+static void on_wake_word(int wake_word_index, void *userdata) {
+    ESP_LOGI(TAG, "Wake word detected! index=%d, state=%d", wake_word_index, g_app_state);
+
+    if (g_app_state == APP_STATE_IDLE) {
+        /* Start a new session */
+        set_app_state(APP_STATE_CONNECTING);
+        ui_lcd_set_hint("Wake word detected!");
+    } else if (g_app_state == APP_STATE_SPEAKING) {
+        /* Path A: local barge-in — interrupt TTS playback */
+        ESP_LOGI(TAG, "Barge-in: wake word during TTS playback");
+        audio_hal_clear_playback();
+        audio_hal_clear_ref();
+        opus_proc_reset_ogg(&g_opus_proc);
+        g_bargein_requested = true;
+        ui_lcd_set_hint("Barge-in detected!");
+    }
+}
+
 /* ---- WebSocket receive callback ---- */
 
 static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
@@ -220,6 +261,7 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                 ESP_LOGI(TAG, "Event 350: TTS text available");
                 if (resp->payload_data && !resp->is_binary) {
                     ESP_LOGI(TAG, "TTS text: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
+                    ui_lcd_set_tts_text((const char *)resp->payload_data);
                 }
                 break;
 
@@ -232,63 +274,107 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                 break;
 
             case 451:
-                /* ASR interim result - just log it */
+                /* ASR interim result */
                 ESP_LOGD(TAG, "Event 451: ASR interim result");
                 if (resp->payload_data && !resp->is_binary) {
                     ESP_LOGD(TAG, "ASR: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
+                    ui_lcd_set_asr_text((const char *)resp->payload_data);
                 }
                 break;
 
             case EVENT_CLEAR_CACHE:
-                ESP_LOGI(TAG, "Event 450: clear audio cache");
+                ESP_LOGI(TAG, "Event 450: clear audio cache (cloud barge-in)");
                 audio_hal_clear_playback();
                 audio_hal_clear_capture();
+                audio_hal_clear_ref();
                 opus_proc_reset_ogg(&g_opus_proc);
                 g_user_querying = true;
-                g_app_state = APP_STATE_LISTENING;
-                ESP_LOGI(TAG, "State changed to LISTENING (EVENT_CLEAR_CACHE), buffers cleared");
+                afe_handler_set_streaming(true);
+                set_app_state(APP_STATE_LISTENING);
+                ui_lcd_set_hint("Listening...");
                 break;
 
             case EVENT_USER_QUERY_END:
                 ESP_LOGI(TAG, "Event 459: user query end");
                 g_user_querying = false;
-                g_app_state = APP_STATE_SPEAKING;
+                afe_handler_set_streaming(false);
                 audio_hal_clear_capture();
-                ESP_LOGI(TAG, "State changed to SPEAKING, capture buffer cleared");
+                set_app_state(APP_STATE_SPEAKING);
+                ui_lcd_set_hint("AI is responding...");
                 break;
 
             case 550:
                 ESP_LOGI(TAG, "Event 550: dialogue text update");
                 if (resp->payload_data && !resp->is_binary) {
                     ESP_LOGI(TAG, "Reply: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
+                    ui_lcd_set_tts_text((const char *)resp->payload_data);
                 }
                 break;
 
             case 559:
                 ESP_LOGI(TAG, "Event 559: dialogue turn complete");
-                /* This event indicates the turn is complete, we'll wait for TTS_ENDED */
                 break;
 
-            case EVENT_TTS_ENDED:
+            case EVENT_TTS_ENDED: {
                 ESP_LOGI(TAG, "Event 359: TTS ended");
                 if (!g_say_hello_done) {
                     g_say_hello_done = true;
                 }
-                /* Always go back to LISTENING after TTS ends, clear buffers */
+
+                /* Check for exit intent: status_code "20000002" */
+                bool exit_intent = false;
+                if (resp->payload_data && !resp->is_binary && resp->payload_data_len > 0) {
+                    cJSON *root = cJSON_ParseWithLength((const char *)resp->payload_data, resp->payload_data_len);
+                    if (root) {
+                        cJSON *sc = cJSON_GetObjectItem(root, "status_code");
+                        if (sc && cJSON_IsString(sc) && strcmp(sc->valuestring, "20000002") == 0) {
+                            exit_intent = true;
+                            ESP_LOGI(TAG, "Exit intent detected (status_code=20000002)");
+                        }
+                        cJSON_Delete(root);
+                    }
+                }
+
                 audio_hal_clear_playback();
                 audio_hal_clear_capture();
+                audio_hal_clear_ref();
                 opus_proc_reset_ogg(&g_opus_proc);
-                g_user_querying = true;
-                g_app_state = APP_STATE_LISTENING;
-                ESP_LOGI(TAG, "State changed to LISTENING (TTS ended), all buffers cleared");
+
+                if (exit_intent) {
+                    /* Gracefully end session, return to idle with wake word listening */
+                    ESP_LOGI(TAG, "Exit intent: finishing session, returning to IDLE");
+                    afe_handler_set_streaming(false);
+                    afe_handler_enable_wakenet();
+                    doubao_ws_finish_session(&g_ws_client);
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    doubao_ws_finish_connection(&g_ws_client);
+                    vTaskDelay(pdMS_TO_TICKS(300));
+                    doubao_ws_destroy(&g_ws_client);
+                    g_session_active = false;
+                    set_app_state(APP_STATE_IDLE);
+                    ui_lcd_set_asr_text("");
+                    ui_lcd_set_tts_text("");
+                    ui_lcd_set_hint("Say \"nihaoxiaozhi\" or press button");
+                } else {
+                    /* Continue conversation: go back to LISTENING */
+                    g_user_querying = true;
+                    afe_handler_set_streaming(true);
+                    set_app_state(APP_STATE_LISTENING);
+                    ui_lcd_set_hint("Listening...");
+                }
                 break;
+            }
 
             case EVENT_SESSION_FINISH_1:
             case EVENT_SESSION_FINISH_2:
                 ESP_LOGI(TAG, "Event %d: session finished", resp->event);
                 g_session_active = false;
-                g_app_state = APP_STATE_IDLE;
-                ESP_LOGI(TAG, "State changed to IDLE");
+                afe_handler_set_streaming(false);
+                afe_handler_enable_wakenet();
+                set_app_state(APP_STATE_IDLE);
+                ui_lcd_set_asr_text("");
+                ui_lcd_set_tts_text("");
+                ui_lcd_set_hint("Say \"nihaoxiaozhi\" or press button");
                 break;
 
             default:
@@ -309,13 +395,12 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
     }
 }
 
-/* ---- Decoded PCM callback (from Opus decoder → playback ring buffer) ---- */
+/* ---- Decoded PCM callback (from Opus decoder -> playback ring buffer) ---- */
 
 static void on_decoded_pcm(const int16_t *pcm, size_t samples, void *userdata) {
     RingbufHandle_t playback_rb = audio_hal_get_playback_rb();
     if (playback_rb) {
         size_t bytes = samples * sizeof(int16_t);
-        /* Blocking write with longer timeout to avoid dropping data */
         if (xRingbufferSend(playback_rb, pcm, bytes, pdMS_TO_TICKS(500)) != pdTRUE) {
             ESP_LOGW(TAG, "Playback buffer full, dropping %d samples", (int)samples);
         }
@@ -325,48 +410,12 @@ static void on_decoded_pcm(const int16_t *pcm, size_t samples, void *userdata) {
 /* ---- FreeRTOS Tasks ---- */
 
 /**
- * Audio Capture Task (Core 1, Priority 22)
- * Reads PCM from I2S mic → capture ring buffer
- */
-static void audio_capture_task(void *pvParameters) {
-    const size_t frame_bytes = OPUS_ENC_FRAME_SIZE * sizeof(int16_t);
-    int16_t *pcm_buf = heap_caps_malloc(frame_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!pcm_buf) {
-        ESP_LOGE(TAG, "Failed to alloc capture PCM buffer");
-        vTaskDelete(NULL);
-        return;
-    }
-
-    RingbufHandle_t capture_rb = audio_hal_get_capture_rb();
-    static uint32_t capture_log_counter = 0;
-
-    while (g_running) {
-        if (g_app_state != APP_STATE_LISTENING) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
-        }
-
-        int read = audio_hal_read(pcm_buf, frame_bytes, pdMS_TO_TICKS(100));
-        if (read > 0 && capture_rb) {
-            if (xRingbufferSend(capture_rb, pcm_buf, read, pdMS_TO_TICKS(10)) != pdTRUE) {
-                ESP_LOGW(TAG, "Capture buffer full");
-            }
-            if (capture_log_counter++ % 100 == 0) {
-                ESP_LOGI(TAG, "Captured %d bytes, state=%d", read, g_app_state);
-            }
-        }
-    }
-
-    free(pcm_buf);
-    vTaskDelete(NULL);
-}
-
-/**
  * Audio Play Task (Core 1, Priority 21)
- * Reads PCM from playback ring buffer → I2S speaker
+ * Reads PCM from playback ring buffer -> I2S speaker + ref_rb for AEC
  */
 static void audio_play_task(void *pvParameters) {
     RingbufHandle_t playback_rb = audio_hal_get_playback_rb();
+    RingbufHandle_t ref_rb = audio_hal_get_ref_rb();
 
     while (g_running) {
         if (!playback_rb) {
@@ -377,6 +426,10 @@ static void audio_play_task(void *pvParameters) {
         size_t item_size;
         void *item = xRingbufferReceive(playback_rb, &item_size, pdMS_TO_TICKS(100));
         if (item) {
+            /* Copy to ref_rb for AEC before writing to speaker (best-effort, non-blocking) */
+            if (ref_rb) {
+                xRingbufferSend(ref_rb, item, item_size, 0);
+            }
             audio_hal_write((const int16_t *)item, item_size, pdMS_TO_TICKS(200));
             vRingbufferReturnItem(playback_rb, item);
         }
@@ -387,7 +440,7 @@ static void audio_play_task(void *pvParameters) {
 
 /**
  * WebSocket TX Task (Core 0, Priority 15)
- * Reads PCM from capture ring buffer → send raw PCM via WebSocket
+ * Reads PCM from capture ring buffer -> send raw PCM via WebSocket
  */
 static void ws_tx_task(void *pvParameters) {
     /* Send in 320-sample chunks (20ms @ 16kHz) */
@@ -433,7 +486,6 @@ static void ws_tx_task(void *pvParameters) {
             vRingbufferReturnItem(capture_rb, item);
 
             if (accumulated >= chunk_bytes) {
-                /* Send raw PCM only if still in LISTENING state */
                 if (g_app_state == APP_STATE_LISTENING) {
                     doubao_ws_send_audio(&g_ws_client, (const uint8_t *)pcm_chunk, accumulated);
                     if (tx_log_counter++ % 50 == 0) {
@@ -451,29 +503,52 @@ static void ws_tx_task(void *pvParameters) {
 
 /**
  * Main FSM Task (Core 0, Priority 10)
- * Handles button press, session lifecycle
+ * Handles button press, wake word trigger, barge-in, session lifecycle
  */
 static void main_fsm_task(void *pvParameters) {
-    ESP_LOGI(TAG, "FSM task started, waiting for button press...");
+    ESP_LOGI(TAG, "FSM task started, say \"nihaoxiaozhi\" or press button...");
 
     static uint32_t state_log_counter = 0;
     while (g_running) {
         if (state_log_counter++ % 200 == 0) {
             ESP_LOGI(TAG, "FSM state: %d, session_active=%d", g_app_state, g_session_active);
         }
+
+        /* Handle barge-in request from wake word callback (Path A) */
+        if (g_bargein_requested) {
+            g_bargein_requested = false;
+            ESP_LOGI(TAG, "Processing barge-in: finishing current session, restarting");
+
+            /* Finish the current session and start a new one */
+            doubao_ws_finish_session(&g_ws_client);
+            vTaskDelay(pdMS_TO_TICKS(300));
+            doubao_ws_finish_connection(&g_ws_client);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            doubao_ws_destroy(&g_ws_client);
+            g_session_active = false;
+
+            /* Immediately start new session */
+            set_app_state(APP_STATE_CONNECTING);
+            ui_lcd_set_asr_text("");
+            ui_lcd_set_tts_text("");
+        }
+
         switch (g_app_state) {
         case APP_STATE_IDLE:
-            /* Phase 1: check button press to start session */
-            /* BOX-3 has boot button on GPIO0 */
+            /* Check button press or wake word (wake word sets state via callback) */
             if (button_pressed()) {
                 ESP_LOGI(TAG, "Button pressed, starting session...");
-                g_app_state = APP_STATE_CONNECTING;
+                set_app_state(APP_STATE_CONNECTING);
+                ui_lcd_set_hint("Button pressed!");
                 vTaskDelay(pdMS_TO_TICKS(300)); /* debounce */
             }
             vTaskDelay(pdMS_TO_TICKS(50));
             break;
 
         case APP_STATE_CONNECTING: {
+            /* Disable wake word during active session */
+            afe_handler_disable_wakenet();
+
             /* Connect WebSocket */
             doubao_ws_config_t ws_config = {
                 .app_id = CONFIG_DOUBAO_APP_ID,
@@ -482,13 +557,15 @@ static void main_fsm_task(void *pvParameters) {
                 .resource_id = "volc.speech.dialog",
                 .tts_speaker = CONFIG_DOUBAO_TTS_SPEAKER,
                 .input_mod = "audio",
-                .asr_audio_format = NULL, /* Raw PCM, simplest and most stable */
+                .asr_audio_format = NULL, /* Raw PCM */
                 .recv_timeout = 10,
             };
 
             if (doubao_ws_init(&g_ws_client, &ws_config) != 0) {
                 ESP_LOGE(TAG, "WS init failed");
-                g_app_state = APP_STATE_IDLE;
+                afe_handler_enable_wakenet();
+                set_app_state(APP_STATE_IDLE);
+                ui_lcd_set_hint("Connection failed, try again");
                 break;
             }
 
@@ -497,23 +574,25 @@ static void main_fsm_task(void *pvParameters) {
             if (doubao_ws_connect(&g_ws_client) != 0) {
                 ESP_LOGE(TAG, "WS connect failed");
                 doubao_ws_destroy(&g_ws_client);
-                g_app_state = APP_STATE_IDLE;
+                afe_handler_enable_wakenet();
+                set_app_state(APP_STATE_IDLE);
+                ui_lcd_set_hint("Connection failed, try again");
                 break;
             }
 
-            g_app_state = APP_STATE_HANDSHAKING;
+            set_app_state(APP_STATE_HANDSHAKING);
             break;
         }
 
         case APP_STATE_HANDSHAKING: {
-            /* Protocol handshake sequence — wait for each command to complete
-             * before sending the next, to avoid WS mutex contention */
             ESP_LOGI(TAG, "Starting handshake...");
 
             if (doubao_ws_start_connection(&g_ws_client) != 0) {
                 ESP_LOGE(TAG, "StartConnection failed");
                 doubao_ws_destroy(&g_ws_client);
-                g_app_state = APP_STATE_IDLE;
+                afe_handler_enable_wakenet();
+                set_app_state(APP_STATE_IDLE);
+                ui_lcd_set_hint("Handshake failed");
                 break;
             }
             vTaskDelay(pdMS_TO_TICKS(1000));
@@ -521,7 +600,9 @@ static void main_fsm_task(void *pvParameters) {
             if (doubao_ws_start_session(&g_ws_client) != 0) {
                 ESP_LOGE(TAG, "StartSession failed");
                 doubao_ws_destroy(&g_ws_client);
-                g_app_state = APP_STATE_IDLE;
+                afe_handler_enable_wakenet();
+                set_app_state(APP_STATE_IDLE);
+                ui_lcd_set_hint("Handshake failed");
                 break;
             }
             vTaskDelay(pdMS_TO_TICKS(1000));
@@ -541,11 +622,17 @@ static void main_fsm_task(void *pvParameters) {
 
             if (g_say_hello_done) {
                 ESP_LOGI(TAG, "Handshake complete, listening...");
-                g_app_state = APP_STATE_LISTENING;
             } else {
                 ESP_LOGW(TAG, "SayHello timeout, starting listening anyway");
-                g_app_state = APP_STATE_LISTENING;
             }
+
+            /* Enable AFE streaming and wake word for barge-in */
+            audio_hal_clear_capture();
+            afe_handler_set_streaming(true);
+            afe_handler_enable_wakenet();
+            g_user_querying = true;
+            set_app_state(APP_STATE_LISTENING);
+            ui_lcd_set_hint("Listening...");
             break;
         }
 
@@ -554,6 +641,8 @@ static void main_fsm_task(void *pvParameters) {
             /* Check button for manual session end */
             if (button_pressed()) {
                 ESP_LOGI(TAG, "Button pressed, ending session...");
+                afe_handler_set_streaming(false);
+
                 doubao_ws_finish_session(&g_ws_client);
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 doubao_ws_finish_connection(&g_ws_client);
@@ -561,16 +650,24 @@ static void main_fsm_task(void *pvParameters) {
 
                 doubao_ws_destroy(&g_ws_client);
                 g_session_active = false;
-                g_app_state = APP_STATE_IDLE;
+                afe_handler_enable_wakenet();
+                set_app_state(APP_STATE_IDLE);
+                ui_lcd_set_asr_text("");
+                ui_lcd_set_tts_text("");
+                ui_lcd_set_hint("Say \"nihaoxiaozhi\" or press button");
 
-                /* Debounce */
-                vTaskDelay(pdMS_TO_TICKS(500));
+                vTaskDelay(pdMS_TO_TICKS(500)); /* debounce */
             }
 
             /* Check if session ended by server */
             if (!g_session_active && g_app_state != APP_STATE_IDLE) {
                 doubao_ws_destroy(&g_ws_client);
-                g_app_state = APP_STATE_IDLE;
+                afe_handler_set_streaming(false);
+                afe_handler_enable_wakenet();
+                set_app_state(APP_STATE_IDLE);
+                ui_lcd_set_asr_text("");
+                ui_lcd_set_tts_text("");
+                ui_lcd_set_hint("Say \"nihaoxiaozhi\" or press button");
             }
 
             vTaskDelay(pdMS_TO_TICKS(50));
@@ -584,7 +681,7 @@ static void main_fsm_task(void *pvParameters) {
 /* ---- Entry Point ---- */
 
 void app_main(void) {
-    ESP_LOGI(TAG, "=== ESP32-S3-BOX-3 Doubao AI Speaker ===");
+    ESP_LOGI(TAG, "=== ESP32-S3-BOX-3 Doubao AI Speaker (Phase 2) ===");
     ESP_LOGI(TAG, "Free heap: %lu, PSRAM: %lu",
              (unsigned long)esp_get_free_heap_size(),
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -620,37 +717,60 @@ void app_main(void) {
     };
     gpio_config(&btn_cfg);
 
+    /* Initialize LCD UI */
+    if (ui_lcd_init() != 0) {
+        ESP_LOGW(TAG, "LCD UI init failed, continuing without display");
+    }
+    ui_lcd_set_state("Booting...");
+
     /* Initialize audio hardware */
     if (audio_hal_init() != 0) {
         ESP_LOGE(TAG, "Audio HAL init failed");
+        ui_lcd_set_state("Audio Error");
         return;
     }
 
     /* Initialize Opus processor */
     if (opus_proc_init(&g_opus_proc) != 0) {
         ESP_LOGE(TAG, "Opus processor init failed");
+        ui_lcd_set_state("Opus Error");
         return;
     }
     opus_proc_set_output_cb(&g_opus_proc, on_decoded_pcm, NULL);
 
-    ESP_LOGI(TAG, "All subsystems initialized. Press button to start conversation.");
+    /* Initialize AFE handler (AFE + WakeNet) */
+    afe_handler_config_t afe_cfg = {
+        .on_wakeup = on_wake_word,
+        .wakeup_userdata = NULL,
+    };
+    if (afe_handler_init(&afe_cfg) != 0) {
+        ESP_LOGE(TAG, "AFE handler init failed");
+        ui_lcd_set_state("AFE Error");
+        return;
+    }
+
+    /* Start AFE tasks (feed + fetch) */
+    afe_handler_start();
+
+    ESP_LOGI(TAG, "All subsystems initialized. Say \"nihaoxiaozhi\" or press button.");
     ESP_LOGI(TAG, "Free heap: %lu, PSRAM: %lu",
              (unsigned long)esp_get_free_heap_size(),
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
+    ui_lcd_set_state("Idle");
+    ui_lcd_set_hint("Say \"nihaoxiaozhi\" or press button");
+
     /* Create FreeRTOS tasks */
 
-    /* Audio tasks on Core 1 */
-    xTaskCreatePinnedToCore(audio_capture_task, "audio_cap",
-                            32768, NULL, 22, NULL, 1);
+    /* Audio play task on Core 1 (also feeds ref_rb for AEC) */
     xTaskCreatePinnedToCore(audio_play_task, "audio_play",
                             16384, NULL, 21, NULL, 1);
 
-    /* WebSocket TX task on Core 0 - LARGE STACK to avoid crashes */
+    /* WebSocket TX task on Core 0 */
     xTaskCreatePinnedToCore(ws_tx_task, "ws_tx",
                             32768, NULL, 15, NULL, 0);
 
-    /* Main FSM task on Core 0 (ws_rx is handled by esp_websocket_client internally) */
+    /* Main FSM task on Core 0 */
     xTaskCreatePinnedToCore(main_fsm_task, "main_fsm",
                             8192, NULL, 10, NULL, 0);
 }
