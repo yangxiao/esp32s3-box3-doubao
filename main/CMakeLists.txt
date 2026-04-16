@@ -5,6 +5,8 @@ idf_component_register(
         "doubao_ws_client.c"
         "audio_hal.c"
         "opus_processor.c"
+        "afe_handler.c"
+        "ui_lcd.c"
     INCLUDE_DIRS
         "."
     PRIV_REQUIRES
@@ -16,4 +18,5 @@ idf_component_register(
         esp_rom
         esp_ringbuf
         driver
+        spiffs
 )
