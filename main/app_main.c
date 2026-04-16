@@ -354,7 +354,7 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                     set_app_state(APP_STATE_IDLE);
                     ui_lcd_set_asr_text("");
                     ui_lcd_set_tts_text("");
-                    ui_lcd_set_hint("Say \"nihaoxiaozhi\" or press button");
+                    ui_lcd_set_hint("Say \"hi, jason\" or press button");
                 } else {
                     /* Continue conversation: go back to LISTENING */
                     g_user_querying = true;
@@ -374,7 +374,7 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                 set_app_state(APP_STATE_IDLE);
                 ui_lcd_set_asr_text("");
                 ui_lcd_set_tts_text("");
-                ui_lcd_set_hint("Say \"nihaoxiaozhi\" or press button");
+                ui_lcd_set_hint("Say \"hi, jason\" or press button");
                 break;
 
             default:
@@ -506,7 +506,7 @@ static void ws_tx_task(void *pvParameters) {
  * Handles button press, wake word trigger, barge-in, session lifecycle
  */
 static void main_fsm_task(void *pvParameters) {
-    ESP_LOGI(TAG, "FSM task started, say \"nihaoxiaozhi\" or press button...");
+    ESP_LOGI(TAG, "FSM task started, say \"hi, jason\" or press button...");
 
     static uint32_t state_log_counter = 0;
     while (g_running) {
@@ -654,7 +654,7 @@ static void main_fsm_task(void *pvParameters) {
                 set_app_state(APP_STATE_IDLE);
                 ui_lcd_set_asr_text("");
                 ui_lcd_set_tts_text("");
-                ui_lcd_set_hint("Say \"nihaoxiaozhi\" or press button");
+                ui_lcd_set_hint("Say \"hi, jason\" or press button");
 
                 vTaskDelay(pdMS_TO_TICKS(500)); /* debounce */
             }
@@ -667,7 +667,7 @@ static void main_fsm_task(void *pvParameters) {
                 set_app_state(APP_STATE_IDLE);
                 ui_lcd_set_asr_text("");
                 ui_lcd_set_tts_text("");
-                ui_lcd_set_hint("Say \"nihaoxiaozhi\" or press button");
+                ui_lcd_set_hint("Say \"hi, jason\" or press button");
             }
 
             vTaskDelay(pdMS_TO_TICKS(50));
@@ -752,13 +752,13 @@ void app_main(void) {
     /* Start AFE tasks (feed + fetch) */
     afe_handler_start();
 
-    ESP_LOGI(TAG, "All subsystems initialized. Say \"nihaoxiaozhi\" or press button.");
+    ESP_LOGI(TAG, "All subsystems initialized. Say \"hi, jason\" or press button.");
     ESP_LOGI(TAG, "Free heap: %lu, PSRAM: %lu",
              (unsigned long)esp_get_free_heap_size(),
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     ui_lcd_set_state("Idle");
-    ui_lcd_set_hint("Say \"nihaoxiaozhi\" or press button");
+    ui_lcd_set_hint("Say \"hi, jason\" or press button");
 
     /* Create FreeRTOS tasks */
 

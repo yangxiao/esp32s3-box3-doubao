@@ -89,6 +89,7 @@ static void afe_feed_task(void *pvParameters) {
 
         /* Feed AFE */
         s_afe->feed(s_afe_data, feed_buf);
+        vTaskDelay(1);
     }
 
     free(mic_buf);
@@ -107,7 +108,7 @@ static void afe_fetch_task(void *pvParameters) {
 
     while (s_running) {
         afe_fetch_result_t *res = s_afe->fetch(s_afe_data);
-        if (!res) {
+        if (!res || res->data_size <= 0) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
@@ -151,9 +152,9 @@ int afe_handler_init(const afe_handler_config_t *config) {
     }
 
     /* Find wake word model */
-    char *wn_name = esp_srmodel_filter(s_models, ESP_WN_PREFIX, "nihaoxiaozhi");
+    char *wn_name = esp_srmodel_filter(s_models, ESP_WN_PREFIX, "hijason");
     if (!wn_name) {
-        ESP_LOGW(TAG, "WakeNet model 'nihaoxiaozhi' not found, trying any WakeNet");
+        ESP_LOGW(TAG, "WakeNet model 'hijason' not found, trying any WakeNet");
         wn_name = esp_srmodel_filter(s_models, ESP_WN_PREFIX, NULL);
     }
     if (wn_name) {
@@ -163,7 +164,10 @@ int afe_handler_init(const afe_handler_config_t *config) {
     }
 
     /* Create AFE config: 2 mics + 1 reference */
-    afe_config_t *afe_config = afe_config_init("MMR", s_models, AFE_TYPE_SR, AFE_MODE_HIGH_PERF);
+    // afe_config_t *afe_config = afe_config_init("MMR", s_models, AFE_TYPE_SR, AFE_MODE_HIGH_PERF);
+    // 暂时关闭 AEC 和高性能模式，看系统是否还卡住
+    afe_config_t *afe_config = afe_config_init("MMR", s_models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
+    afe_config->aec_init = false;
     if (!afe_config) {
         ESP_LOGE(TAG, "afe_config_init failed");
         return -1;
