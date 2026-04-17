@@ -56,10 +56,16 @@ static void afe_feed_task(void *pvParameters) {
 
     RingbufHandle_t ref_rb = audio_hal_get_ref_rb();
 
+    uint32_t feed_count = 0;
     while (s_running) {
+        if (feed_count++ % 100 == 0) {
+            ESP_LOGI(TAG, "Feed loop alive, count=%lu", (unsigned long)feed_count);
+        }
+
         /* Read 2-channel interleaved mic data */
         int ret = audio_hal_read_stereo(mic_buf, mic_buf_bytes, pdMS_TO_TICKS(200));
         if (ret <= 0) {
+            ESP_LOGW(TAG, "audio_hal_read_stereo failed: %d", ret);
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
@@ -88,7 +94,9 @@ static void afe_feed_task(void *pvParameters) {
         }
 
         /* Feed AFE */
+        ESP_LOGD(TAG, "Calling afe->feed()...");
         s_afe->feed(s_afe_data, feed_buf);
+        ESP_LOGD(TAG, "afe->feed() returned");
         vTaskDelay(1);
     }
 
@@ -106,9 +114,24 @@ static void afe_fetch_task(void *pvParameters) {
 
     ESP_LOGI(TAG, "Fetch task started: chunksize=%d samples", s_fetch_chunksize);
 
+    uint32_t fetch_count = 0;
     while (s_running) {
+        if (fetch_count++ % 100 == 0) {
+            ESP_LOGI(TAG, "Fetch loop alive, count=%lu", (unsigned long)fetch_count);
+        }
+
+        ESP_LOGD(TAG, "Calling afe->fetch()...");
         afe_fetch_result_t *res = s_afe->fetch(s_afe_data);
-        if (!res || res->data_size <= 0) {
+        ESP_LOGD(TAG, "afe->fetch() returned: res=%p", res);
+
+        if (!res) {
+            ESP_LOGW(TAG, "fetch returned NULL");
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
+        if (res->data_size <= 0) {
+            ESP_LOGD(TAG, "fetch returned zero data_size");
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
