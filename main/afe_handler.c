@@ -59,14 +59,14 @@ static void afe_feed_task(void *pvParameters) {
 
     /* Start fetch task before entering loop */
     ESP_LOGI(TAG, "Starting fetch task...");
-    xTaskCreatePinnedToCore(afe_fetch_task, "afe_fetch", 3072, NULL, 20, &s_fetch_task_handle, 1);
+    xTaskCreatePinnedToCore(afe_fetch_task, "afe_fetch", 3072, NULL, 22, &s_fetch_task_handle, 1);
     ESP_LOGI(TAG, "Fetch task started");
 
     RingbufHandle_t ref_rb = audio_hal_get_ref_rb();
 
     uint32_t feed_count = 0;
     while (s_running) {
-        if (feed_count++ % 10000 == 0) {
+        if (feed_count++ % 5000 == 0) {
             ESP_LOGI(TAG, "Feed loop alive, count=%lu", (unsigned long)feed_count);
         }
 
@@ -124,7 +124,7 @@ static void afe_fetch_task(void *pvParameters) {
 
     uint32_t fetch_count = 0;
     while (s_running) {
-        if (fetch_count++ % 10000 == 0) {
+        if (fetch_count++ % 5000 == 0) {
             ESP_LOGI(TAG, "Fetch loop alive, count=%lu", (unsigned long)fetch_count);
         }
 
