@@ -298,8 +298,8 @@ int doubao_ws_connect(doubao_ws_client_t *client) {
 
     esp_websocket_client_config_t ws_cfg = {
         .uri = uri,
-        .buffer_size = 32768,
-        .task_stack = 16384,
+        .buffer_size = 2048,
+        .task_stack = 7168,
         .reconnect_timeout_ms = 5000,
         .network_timeout_ms = 10000,
         .crt_bundle_attach = esp_crt_bundle_attach,
