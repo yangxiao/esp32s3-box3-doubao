@@ -199,6 +199,12 @@ int afe_handler_init(const afe_handler_config_t *config) {
     // 暂时关闭 AEC 和高性能模式，看系统是否还卡住
     afe_config_t *afe_config = afe_config_init("MMR", s_models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
     afe_config->aec_init = false;
+    // 强制所有算法内存（AEC/BSS/VAD）进入 PSRAM
+    afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
+
+    // 强制把 AFE 的内部环形缓冲区也设在 PSRAM
+    afe_config->afe_ringbuf_size = 64; // 适当调大以解决 Buffer Full
+
     if (!afe_config) {
         ESP_LOGE(TAG, "afe_config_init failed");
         return -1;

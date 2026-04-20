@@ -264,7 +264,8 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                 if (resp->payload_data && !resp->is_binary) {
                     //ESP_LOGI(TAG, "TTS text: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
                     ESP_LOGI(TAG, "TTS text: payload_data_len=%d", (int)resp->payload_data_len);
-                    ui_lcd_set_tts_text((const char *)resp->payload_data);
+                    ui_lcd_set_tts_text("speaking... letters");
+                    // ui_lcd_set_tts_text((const char *)resp->payload_data);
                 }
                 break;
 
