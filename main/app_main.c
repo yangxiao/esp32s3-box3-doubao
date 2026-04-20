@@ -16,6 +16,7 @@
 #include "esp_heap_caps.h"
 #include "driver/gpio.h"
 #include "cJSON.h"
+#include "esp_task_wdt.h"
 
 #include "bsp/esp-bsp.h"
 
@@ -416,8 +417,12 @@ static void on_decoded_pcm(const int16_t *pcm, size_t samples, void *userdata) {
 static void audio_play_task(void *pvParameters) {
     RingbufHandle_t playback_rb = audio_hal_get_playback_rb();
     RingbufHandle_t ref_rb = audio_hal_get_ref_rb();
-
+    uint32_t play_count = 0;
+    ESP_LOGI(TAG, "Audio play task started.");
     while (g_running) {
+        if (play_count++ % 1000 == 0) {
+            ESP_LOGI(TAG, "Play loop alive, count=%lu", (unsigned long)play_count);
+        }
         if (!playback_rb) {
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
@@ -443,6 +448,7 @@ static void audio_play_task(void *pvParameters) {
  * Reads PCM from capture ring buffer -> send raw PCM via WebSocket
  */
 static void ws_tx_task(void *pvParameters) {
+    ESP_LOGI(TAG, "WS TX task started.");
     /* Send in 320-sample chunks (20ms @ 16kHz) */
     const size_t chunk_bytes = 320 * sizeof(int16_t);
     int16_t *pcm_chunk = heap_caps_malloc(chunk_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -560,7 +566,10 @@ static void main_fsm_task(void *pvParameters) {
                 .asr_audio_format = NULL, /* Raw PCM */
                 .recv_timeout = 10,
             };
-
+            ESP_LOGI(TAG, "B4 WS connect, Free heap: %lu, PSRAM: %lu, IRAM: %lu",
+             (unsigned long)esp_get_free_heap_size(),
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
             if (doubao_ws_init(&g_ws_client, &ws_config) != 0) {
                 ESP_LOGE(TAG, "WS init failed");
                 afe_handler_enable_wakenet();
@@ -761,16 +770,26 @@ void app_main(void) {
     ui_lcd_set_hint("Say \"hi, jason\" or press button");
 
     /* Create FreeRTOS tasks */
-
     /* Audio play task on Core 1 (also feeds ref_rb for AEC) */
-    xTaskCreatePinnedToCore(audio_play_task, "audio_play",
-                            16384, NULL, 21, NULL, 1);
-
+    int task_ret;
+    task_ret = xTaskCreatePinnedToCore(audio_play_task, "audio_play",
+                            4096, NULL, 21, NULL, 1);
+    ESP_LOGI(TAG, "create audio play task ret=%d", task_ret);
     /* WebSocket TX task on Core 0 */
-    xTaskCreatePinnedToCore(ws_tx_task, "ws_tx",
-                            32768, NULL, 15, NULL, 0);
+    
+    task_ret = xTaskCreatePinnedToCore(ws_tx_task, "ws_tx",
+                            4096, NULL, 15, NULL, 0);
+    ESP_LOGI(TAG, "ws_tx_task task ret=%d", task_ret);                 
 
     /* Main FSM task on Core 0 */
-    xTaskCreatePinnedToCore(main_fsm_task, "main_fsm",
-                            8192, NULL, 10, NULL, 0);
+    task_ret = xTaskCreatePinnedToCore(main_fsm_task, "main_fsm",
+                            6144, NULL, 10, NULL, 0);
+    ESP_LOGI(TAG, "main_fsm_task task ret=%d", task_ret); 
+    // 关键：检查任务是否在就绪队列
+    ESP_LOGI("SCHED", "Tasks created, checking scheduler...");
+
+    char task_list[1024];
+    vTaskList(task_list);
+    ESP_LOGI("SCHED", "Task List:\n%s", task_list);
+
 }

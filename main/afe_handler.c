@@ -29,6 +29,9 @@ static volatile bool s_streaming = false;
 static afe_wakeup_cb_t s_on_wakeup = NULL;
 static void *s_wakeup_userdata = NULL;
 
+/* Forward declaration */
+static void afe_fetch_task(void *pvParameters);
+
 /* ---- AFE Feed Task (Core 1, highest audio priority) ---- */
 
 static void afe_feed_task(void *pvParameters) {
@@ -54,11 +57,16 @@ static void afe_feed_task(void *pvParameters) {
     ESP_LOGI(TAG, "Feed task started: chunksize=%d, samples_per_ch=%d",
              s_feed_chunksize, samples_per_ch);
 
+    /* Start fetch task before entering loop */
+    ESP_LOGI(TAG, "Starting fetch task...");
+    xTaskCreatePinnedToCore(afe_fetch_task, "afe_fetch", 3072, NULL, 20, &s_fetch_task_handle, 1);
+    ESP_LOGI(TAG, "Fetch task started");
+
     RingbufHandle_t ref_rb = audio_hal_get_ref_rb();
 
     uint32_t feed_count = 0;
     while (s_running) {
-        if (feed_count++ % 100 == 0) {
+        if (feed_count++ % 10000 == 0) {
             ESP_LOGI(TAG, "Feed loop alive, count=%lu", (unsigned long)feed_count);
         }
 
@@ -116,7 +124,7 @@ static void afe_fetch_task(void *pvParameters) {
 
     uint32_t fetch_count = 0;
     while (s_running) {
-        if (fetch_count++ % 100 == 0) {
+        if (fetch_count++ % 10000 == 0) {
             ESP_LOGI(TAG, "Fetch loop alive, count=%lu", (unsigned long)fetch_count);
         }
 
@@ -244,9 +252,9 @@ void afe_handler_start(void) {
     s_running = true;
     s_streaming = false;
 
-    xTaskCreatePinnedToCore(afe_feed_task, "afe_feed", 8192, NULL, 23, &s_feed_task_handle, 1);
-    xTaskCreatePinnedToCore(afe_fetch_task, "afe_fetch", 16384, NULL, 20, &s_fetch_task_handle, 0);
-    ESP_LOGI(TAG, "AFE tasks started");
+    /* Only start feed task, fetch task will be started from feed task */
+    xTaskCreatePinnedToCore(afe_feed_task, "afe_feed", 3072, NULL, 23, &s_feed_task_handle, 1);
+    ESP_LOGI(TAG, "AFE feed task started");
 }
 
 void afe_handler_set_streaming(bool enable) {
