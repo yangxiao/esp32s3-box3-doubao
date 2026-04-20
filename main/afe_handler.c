@@ -203,7 +203,7 @@ int afe_handler_init(const afe_handler_config_t *config) {
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
 
     // 强制把 AFE 的内部环形缓冲区也设在 PSRAM
-    afe_config->afe_ringbuf_size = 64; // 适当调大以解决 Buffer Full
+    afe_config->afe_ringbuf_size = 512; // 适当调大以解决 Buffer Full
 
     if (!afe_config) {
         ESP_LOGE(TAG, "afe_config_init failed");
