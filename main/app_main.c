@@ -234,7 +234,8 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
 
     } else if (resp->message_type == MSG_SERVER_FULL_RESPONSE) {
         if (resp->payload_data && !resp->is_binary) {
-            ESP_LOGI(TAG, "Server: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
+            //ESP_LOGI(TAG, "Server: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
+            ESP_LOGI(TAG, "Server: payload_len=%d", (int)resp->payload_data_len);
         }
 
         if (resp->has_event) {
@@ -261,7 +262,8 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
             case 350:
                 ESP_LOGI(TAG, "Event 350: TTS text available");
                 if (resp->payload_data && !resp->is_binary) {
-                    ESP_LOGI(TAG, "TTS text: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
+                    //ESP_LOGI(TAG, "TTS text: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
+                    ESP_LOGI(TAG, "TTS text: payload_data_len=%d", (int)resp->payload_data_len);
                     ui_lcd_set_tts_text((const char *)resp->payload_data);
                 }
                 break;
