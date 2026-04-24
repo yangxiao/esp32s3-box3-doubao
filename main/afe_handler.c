@@ -59,7 +59,7 @@ static void afe_feed_task(void *pvParameters) {
 
     /* Start fetch task before entering loop */
     ESP_LOGI(TAG, "Starting fetch task...");
-    xTaskCreatePinnedToCore(afe_fetch_task, "afe_fetch", 3072, NULL, 22, &s_fetch_task_handle, 1);
+    xTaskCreatePinnedToCore(afe_fetch_task, "afe_fetch", 3072, NULL, 22, &s_fetch_task_handle, 0);
     ESP_LOGI(TAG, "Fetch task started");
 
     RingbufHandle_t ref_rb = audio_hal_get_ref_rb();
