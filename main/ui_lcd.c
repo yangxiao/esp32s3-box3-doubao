@@ -49,7 +49,7 @@ int ui_lcd_init(void) {
     lbl_status = lv_label_create(status_bar);
     lv_label_set_text(lbl_status, "Idle");
     lv_obj_set_style_text_color(lbl_status, COLOR_WHITE, 0);
-    lv_obj_set_style_text_font(lbl_status, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(lbl_status, &lv_font_source_han_sans_sc_16_cjk, 0);
     lv_obj_center(lbl_status);
 
     /* ---- Middle dialogue area (y=40, h=156) ---- */
@@ -69,7 +69,7 @@ int ui_lcd_init(void) {
     lv_obj_set_width(lbl_asr, 300);
     lv_label_set_long_mode(lbl_asr, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(lbl_asr, COLOR_ASR_TEXT, 0);
-    lv_obj_set_style_text_font(lbl_asr, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(lbl_asr, &lv_font_source_han_sans_sc_16_cjk, 0);
 
     /* TTS label (AI reply) */
     lbl_tts = lv_label_create(dialog_area);
@@ -77,7 +77,7 @@ int ui_lcd_init(void) {
     lv_obj_set_width(lbl_tts, 300);
     lv_label_set_long_mode(lbl_tts, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(lbl_tts, COLOR_TTS_TEXT, 0);
-    lv_obj_set_style_text_font(lbl_tts, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(lbl_tts, &lv_font_source_han_sans_sc_16_cjk, 0);
 
     /* ---- Bottom hint bar (y=200, h=40) ---- */
     lv_obj_t *hint_bar = lv_obj_create(scr);
@@ -91,7 +91,7 @@ int ui_lcd_init(void) {
     lbl_hint = lv_label_create(hint_bar);
     lv_label_set_text(lbl_hint, "Say \"hi, jason\" or press button");
     lv_obj_set_style_text_color(lbl_hint, COLOR_HINT_TEXT, 0);
-    lv_obj_set_style_text_font(lbl_hint, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(lbl_hint, &lv_font_source_han_sans_sc_16_cjk, 0);
     lv_obj_center(lbl_hint);
 
     bsp_display_unlock();
