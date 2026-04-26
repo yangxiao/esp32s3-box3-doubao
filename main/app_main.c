@@ -279,9 +279,9 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
 
             case 451:
                 /* ASR interim result */
-                ESP_LOGD(TAG, "Event 451: ASR interim result");
+                ESP_LOGI(TAG, "Event 451: ASR interim result");
                 if (resp->payload_data && !resp->is_binary) {
-                    ESP_LOGD(TAG, "ASR: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
+                    ESP_LOGI(TAG, "ASR: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
                     ui_lcd_set_asr_text((const char *)resp->payload_data);
                 }
                 break;
