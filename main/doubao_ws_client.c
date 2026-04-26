@@ -75,12 +75,13 @@ static int build_start_session_json(char *json_buf, size_t json_buf_size,
                 "}"
             "},"
             "\"dialog\":{"
-                "\"bot_name\":\"豆包\","
+                "\"bot_name\":\"Jason\","
                 "\"system_role\":\"你使用活泼灵动的女声，性格开朗，热爱生活。\","
                 "\"speaking_style\":\"你的说话风格简洁明了，语速适中，语调自然。\","
-                "\"location\":{\"city\":\"北京\"},"
+                "\"location\":{\"city\":\"上海\"},"
                 "\"extra\":{"
                     "\"strict_audit\":false,"
+                    "\"enable_user_query_exit\":true,"
                     "\"audit_response\":\"支持客户自定义安全审核回复话术。\","
                     "\"recv_timeout\":%d,"
                     "\"input_mod\":\"%s\""
@@ -88,7 +89,7 @@ static int build_start_session_json(char *json_buf, size_t json_buf_size,
             "}"
         "}",
         asr_block,
-        config->tts_speaker ? config->tts_speaker : "zh_female_vv_jupiter_bigtts",
+        config->tts_speaker ? config->tts_speaker : "zh_male_yunzhou_jupiter_bigtts",
         config->recv_timeout,
         config->input_mod ? config->input_mod : "audio");
 }
@@ -379,7 +380,7 @@ int doubao_ws_start_session(doubao_ws_client_t *client) {
 }
 
 int doubao_ws_say_hello(doubao_ws_client_t *client) {
-    const char *payload = "{\"content\":\"你好，我是豆包，有什么可以帮助你的？\"}";
+    const char *payload = "{\"content\":\"你好，我是Jason。\"}";
     size_t msg_len;
     uint8_t *buf = build_command(
         MSG_CLIENT_FULL_REQUEST, FLAG_MSG_WITH_EVENT,
