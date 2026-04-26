@@ -380,7 +380,7 @@ int doubao_ws_start_session(doubao_ws_client_t *client) {
 }
 
 int doubao_ws_say_hello(doubao_ws_client_t *client) {
-    const char *payload = "{\"content\":\"你好，我是Jason。\"}";
+    const char *payload = "{\"content\":\"我在。\"}";
     size_t msg_len;
     uint8_t *buf = build_command(
         MSG_CLIENT_FULL_REQUEST, FLAG_MSG_WITH_EVENT,

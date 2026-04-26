@@ -34,7 +34,8 @@ static const char *TAG = "app_main";
 typedef enum {
     APP_STATE_IDLE = 0,
     APP_STATE_CONNECTING,       /* WiFi + WebSocket connecting */
-    APP_STATE_HANDSHAKING,      /* StartConnection + StartSession + SayHello */
+    APP_STATE_CONNECTED_IDLE,   /* WebSocket connected, waiting for wake word/button */
+    APP_STATE_HANDSHAKING,      /* StartSession + SayHello (StartConnection already done) */
     APP_STATE_LISTENING,        /* Microphone active, streaming to server */
     APP_STATE_SPEAKING,         /* Playing TTS audio from server */
 } app_state_t;
@@ -73,6 +74,7 @@ static void set_app_state(app_state_t new_state) {
     switch (new_state) {
     case APP_STATE_IDLE:        label = "Idle";        break;
     case APP_STATE_CONNECTING:  label = "Connecting";  break;
+    case APP_STATE_CONNECTED_IDLE: label = "Ready";    break;
     case APP_STATE_HANDSHAKING: label = "Handshaking"; break;
     case APP_STATE_LISTENING:   label = "Listening";   break;
     case APP_STATE_SPEAKING:    label = "Speaking";    break;
@@ -206,9 +208,10 @@ static int wifi_init_sta(void) {
 static void on_wake_word(int wake_word_index, void *userdata) {
     ESP_LOGI(TAG, "Wake word detected! index=%d, state=%d", wake_word_index, g_app_state);
 
-    if (g_app_state == APP_STATE_IDLE) {
+    if (g_app_state == APP_STATE_CONNECTED_IDLE) {
         /* Start a new session */
-        set_app_state(APP_STATE_CONNECTING);
+        afe_handler_disable_wakenet();
+        set_app_state(APP_STATE_HANDSHAKING);
         ui_lcd_set_hint("Wake word detected!");
     } else if (g_app_state == APP_STATE_SPEAKING) {
         /* Path A: local barge-in — interrupt TTS playback */
@@ -264,8 +267,8 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                 if (resp->payload_data && !resp->is_binary) {
                     //ESP_LOGI(TAG, "TTS text: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
                     ESP_LOGI(TAG, "TTS text: payload_data_len=%d", (int)resp->payload_data_len);
-                    ui_lcd_set_tts_text("speaking... letters");
-                    //ui_lcd_set_tts_text((const char *)resp->payload_data);
+                    //ui_lcd_set_tts_text("speaking... letters");
+                    ui_lcd_set_tts_text((const char *)resp->payload_data);
                 }
                 break;
 
@@ -282,7 +285,31 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                 ESP_LOGI(TAG, "Event 451: ASR interim result");
                 if (resp->payload_data && !resp->is_binary) {
                     ESP_LOGI(TAG, "ASR: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
-                    ui_lcd_set_asr_text((const char *)resp->payload_data);
+
+                    /* Parse JSON to check is_interim from results[0] */
+                    cJSON *root = cJSON_ParseWithLength((const char *)resp->payload_data, resp->payload_data_len);
+                    if (root) {
+                        cJSON *results = cJSON_GetObjectItem(root, "results");
+                        if (results && cJSON_IsArray(results) && cJSON_GetArraySize(results) > 0) {
+                            cJSON *result0 = cJSON_GetArrayItem(results, 0);
+                            if (result0) {
+                                cJSON *is_interim = cJSON_GetObjectItem(result0, "is_interim");
+                                bool is_final = true;
+                                if (is_interim && cJSON_IsBool(is_interim)) {
+                                    is_final = !cJSON_IsTrue(is_interim);
+                                    ESP_LOGI(TAG, "is_interim=%d, is_final=%d", cJSON_IsTrue(is_interim), is_final);
+                                }
+
+                                if (is_final) {
+                                    cJSON *text = cJSON_GetObjectItem(result0, "text");
+                                    if (text && cJSON_IsString(text)) {
+                                        ui_lcd_set_asr_text(text->valuestring);
+                                    }
+                                }
+                            }
+                        }
+                        cJSON_Delete(root);
+                    }
                 }
                 break;
 
@@ -311,7 +338,16 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                 ESP_LOGI(TAG, "Event 550: dialogue text update");
                 if (resp->payload_data && !resp->is_binary) {
                     ESP_LOGI(TAG, "Reply: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
-                    ui_lcd_set_tts_text((const char *)resp->payload_data);
+
+                    /* Parse JSON to get content field */
+                    cJSON *root = cJSON_ParseWithLength((const char *)resp->payload_data, resp->payload_data_len);
+                    if (root) {
+                        cJSON *content = cJSON_GetObjectItem(root, "content");
+                        if (content && cJSON_IsString(content)) {
+                            ui_lcd_set_tts_text(content->valuestring);
+                        }
+                        cJSON_Delete(root);
+                    }
                 }
                 break;
 
@@ -345,17 +381,14 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                 opus_proc_reset_ogg(&g_opus_proc);
 
                 if (exit_intent) {
-                    /* Gracefully end session, return to idle with wake word listening */
-                    ESP_LOGI(TAG, "Exit intent: finishing session, returning to IDLE");
+                    /* Gracefully end session, keep connection alive */
+                    ESP_LOGI(TAG, "Exit intent: finishing session, keeping connection alive");
                     afe_handler_set_streaming(false);
                     afe_handler_enable_wakenet();
                     doubao_ws_finish_session(&g_ws_client);
                     vTaskDelay(pdMS_TO_TICKS(500));
-                    doubao_ws_finish_connection(&g_ws_client);
-                    vTaskDelay(pdMS_TO_TICKS(300));
-                    doubao_ws_destroy(&g_ws_client);
                     g_session_active = false;
-                    set_app_state(APP_STATE_IDLE);
+                    set_app_state(APP_STATE_CONNECTED_IDLE);
                     ui_lcd_set_asr_text("");
                     ui_lcd_set_tts_text("");
                     ui_lcd_set_hint("Say \"hi, jason\" or press button");
@@ -528,34 +561,27 @@ static void main_fsm_task(void *pvParameters) {
             g_bargein_requested = false;
             ESP_LOGI(TAG, "Processing barge-in: finishing current session, restarting");
 
-            /* Finish the current session and start a new one */
+            /* Finish the current session and start a new one - keep connection alive */
             doubao_ws_finish_session(&g_ws_client);
             vTaskDelay(pdMS_TO_TICKS(300));
-            doubao_ws_finish_connection(&g_ws_client);
-            vTaskDelay(pdMS_TO_TICKS(200));
-            doubao_ws_destroy(&g_ws_client);
             g_session_active = false;
 
             /* Immediately start new session */
-            set_app_state(APP_STATE_CONNECTING);
+            set_app_state(APP_STATE_HANDSHAKING);
             ui_lcd_set_asr_text("");
             ui_lcd_set_tts_text("");
         }
 
         switch (g_app_state) {
         case APP_STATE_IDLE:
-            /* Check button press or wake word (wake word sets state via callback) */
-            if (button_pressed()) {
-                ESP_LOGI(TAG, "Button pressed, starting session...");
-                set_app_state(APP_STATE_CONNECTING);
-                ui_lcd_set_hint("Button pressed!");
-                vTaskDelay(pdMS_TO_TICKS(300)); /* debounce */
-            }
+            /* Should not be in IDLE, we keep connection always connected */
+            ESP_LOGW(TAG, "Unexpected IDLE state, reconnecting...");
+            set_app_state(APP_STATE_CONNECTING);
             vTaskDelay(pdMS_TO_TICKS(50));
             break;
 
         case APP_STATE_CONNECTING: {
-            /* Disable wake word during active session */
+            /* Disable wake word during connection setup */
             afe_handler_disable_wakenet();
 
             /* Connect WebSocket */
@@ -576,8 +602,10 @@ static void main_fsm_task(void *pvParameters) {
             if (doubao_ws_init(&g_ws_client, &ws_config) != 0) {
                 ESP_LOGE(TAG, "WS init failed");
                 afe_handler_enable_wakenet();
-                set_app_state(APP_STATE_IDLE);
-                ui_lcd_set_hint("Connection failed, try again");
+                set_app_state(APP_STATE_CONNECTED_IDLE);
+                ui_lcd_set_hint("Connection failed, retrying...");
+                vTaskDelay(pdMS_TO_TICKS(3000));
+                set_app_state(APP_STATE_CONNECTING);
                 break;
             }
 
@@ -587,37 +615,57 @@ static void main_fsm_task(void *pvParameters) {
                 ESP_LOGE(TAG, "WS connect failed");
                 doubao_ws_destroy(&g_ws_client);
                 afe_handler_enable_wakenet();
-                set_app_state(APP_STATE_IDLE);
-                ui_lcd_set_hint("Connection failed, try again");
+                set_app_state(APP_STATE_CONNECTED_IDLE);
+                ui_lcd_set_hint("Connection failed, retrying...");
+                vTaskDelay(pdMS_TO_TICKS(3000));
+                set_app_state(APP_STATE_CONNECTING);
                 break;
             }
 
-            set_app_state(APP_STATE_HANDSHAKING);
-            break;
-        }
-
-        case APP_STATE_HANDSHAKING: {
-            ESP_LOGI(TAG, "Starting handshake...");
-
+            /* Start connection level */
             if (doubao_ws_start_connection(&g_ws_client) != 0) {
                 ESP_LOGE(TAG, "StartConnection failed");
                 doubao_ws_destroy(&g_ws_client);
                 afe_handler_enable_wakenet();
-                set_app_state(APP_STATE_IDLE);
-                ui_lcd_set_hint("Handshake failed");
+                set_app_state(APP_STATE_CONNECTED_IDLE);
+                ui_lcd_set_hint("Connection failed, retrying...");
+                vTaskDelay(pdMS_TO_TICKS(3000));
+                set_app_state(APP_STATE_CONNECTING);
                 break;
             }
-            vTaskDelay(pdMS_TO_TICKS(1000));
 
+            /* Connection established, go to idle waiting for wake word/button */
+            afe_handler_enable_wakenet();
+            set_app_state(APP_STATE_CONNECTED_IDLE);
+            ui_lcd_set_hint("Say \"hi, jason\" or press button");
+            break;
+        }
+
+        case APP_STATE_CONNECTED_IDLE:
+            /* Check button press or wake word (wake word sets state via callback) */
+            if (button_pressed()) {
+                ESP_LOGI(TAG, "Button pressed, starting session...");
+                afe_handler_disable_wakenet();
+                set_app_state(APP_STATE_HANDSHAKING);
+                ui_lcd_set_hint("Button pressed!");
+                vTaskDelay(pdMS_TO_TICKS(300)); /* debounce */
+            }
+            vTaskDelay(pdMS_TO_TICKS(50));
+            break;
+
+        case APP_STATE_HANDSHAKING: {
+            ESP_LOGI(TAG, "Starting new session...");
+
+            /* Start session and say hello - connection already established */
             if (doubao_ws_start_session(&g_ws_client) != 0) {
                 ESP_LOGE(TAG, "StartSession failed");
-                doubao_ws_destroy(&g_ws_client);
+                /* Don't destroy connection, just go back to idle */
                 afe_handler_enable_wakenet();
-                set_app_state(APP_STATE_IDLE);
-                ui_lcd_set_hint("Handshake failed");
+                set_app_state(APP_STATE_CONNECTED_IDLE);
+                ui_lcd_set_hint("Session failed, try again");
                 break;
             }
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            vTaskDelay(pdMS_TO_TICKS(500));
 
             g_say_hello_done = false;
             g_session_active = true;
@@ -655,15 +703,13 @@ static void main_fsm_task(void *pvParameters) {
                 ESP_LOGI(TAG, "Button pressed, ending session...");
                 afe_handler_set_streaming(false);
 
+                /* Only finish session, keep connection alive */
                 doubao_ws_finish_session(&g_ws_client);
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                doubao_ws_finish_connection(&g_ws_client);
                 vTaskDelay(pdMS_TO_TICKS(500));
 
-                doubao_ws_destroy(&g_ws_client);
                 g_session_active = false;
                 afe_handler_enable_wakenet();
-                set_app_state(APP_STATE_IDLE);
+                set_app_state(APP_STATE_CONNECTED_IDLE);
                 ui_lcd_set_asr_text("");
                 ui_lcd_set_tts_text("");
                 ui_lcd_set_hint("Say \"hi, jason\" or press button");
@@ -672,11 +718,11 @@ static void main_fsm_task(void *pvParameters) {
             }
 
             /* Check if session ended by server */
-            if (!g_session_active && g_app_state != APP_STATE_IDLE) {
-                doubao_ws_destroy(&g_ws_client);
+            if (!g_session_active && g_app_state != APP_STATE_CONNECTED_IDLE) {
+                /* Don't destroy connection, just go back to idle */
                 afe_handler_set_streaming(false);
                 afe_handler_enable_wakenet();
-                set_app_state(APP_STATE_IDLE);
+                set_app_state(APP_STATE_CONNECTED_IDLE);
                 ui_lcd_set_asr_text("");
                 ui_lcd_set_tts_text("");
                 ui_lcd_set_hint("Say \"hi, jason\" or press button");
@@ -769,8 +815,8 @@ void app_main(void) {
              (unsigned long)esp_get_free_heap_size(),
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
-    ui_lcd_set_state("Idle");
-    ui_lcd_set_hint("Say \"hi, jason\" or press button");
+    ui_lcd_set_state("Connecting");
+    ui_lcd_set_hint("Connecting to server...");
 
     /* Create FreeRTOS tasks */
     /* Audio play task on Core 1 (also feeds ref_rb for AEC) */
@@ -779,20 +825,18 @@ void app_main(void) {
                             4096, NULL, 21, NULL, 1);
     ESP_LOGI(TAG, "create audio play task ret=%d", task_ret);
     /* WebSocket TX task on Core 0 */
-    
+
     task_ret = xTaskCreatePinnedToCore(ws_tx_task, "ws_tx",
                             4096, NULL, 15, NULL, 0);
-    ESP_LOGI(TAG, "ws_tx_task task ret=%d", task_ret);                 
+    ESP_LOGI(TAG, "ws_tx_task task ret=%d", task_ret);
 
     /* Main FSM task on Core 0 */
     task_ret = xTaskCreatePinnedToCore(main_fsm_task, "main_fsm",
                             6144, NULL, 10, NULL, 0);
-    ESP_LOGI(TAG, "main_fsm_task task ret=%d", task_ret); 
+    ESP_LOGI(TAG, "main_fsm_task task ret=%d", task_ret);
     // 关键：检查任务是否在就绪队列
     ESP_LOGI("SCHED", "Tasks created, checking scheduler...");
 
-    char task_list[1024];
-    vTaskList(task_list);
-    ESP_LOGI("SCHED", "Task List:\n%s", task_list);
-
+    /* Immediately start connecting to server */
+    set_app_state(APP_STATE_CONNECTING);
 }
