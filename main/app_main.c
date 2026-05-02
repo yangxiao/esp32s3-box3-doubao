@@ -736,13 +736,8 @@ static void main_fsm_task(void *pvParameters) {
 
         case APP_STATE_CONNECTED_IDLE:
             /* Check if WebSocket is still connected - if not, reconnect */
-            static uint32_t last_connection_check = 0;
-            uint32_t now = esp_log_timestamp();
-            if (!doubao_ws_is_connected(&g_ws_client) || (now - last_connection_check > 5000)) {
-                if (!doubao_ws_is_connected(&g_ws_client)) {
-                    ESP_LOGW(TAG, "WebSocket disconnected, reconnecting...");
-                }
-                last_connection_check = now;
+            if (!doubao_ws_is_connected(&g_ws_client)) {
+                ESP_LOGW(TAG, "WebSocket disconnected, reconnecting...");
                 /* Clean up and reconnect */
                 doubao_ws_destroy(&g_ws_client);
                 set_app_state(APP_STATE_CONNECTING);
