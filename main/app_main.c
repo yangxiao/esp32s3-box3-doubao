@@ -695,6 +695,15 @@ static void main_fsm_task(void *pvParameters) {
         }
 
         case APP_STATE_CONNECTED_IDLE:
+            /* Check if WebSocket is still connected - if not, reconnect */
+            if (!doubao_ws_is_connected(&g_ws_client)) {
+                ESP_LOGW(TAG, "WebSocket disconnected, reconnecting...");
+                doubao_ws_destroy(&g_ws_client);
+                set_app_state(APP_STATE_CONNECTING);
+                ui_lcd_set_hint("Reconnecting...");
+                break;
+            }
+
             /* Check button press or wake word (wake word sets state via callback) */
             if (button_pressed()) {
                 ESP_LOGI(TAG, "Button pressed, starting session...");
@@ -708,6 +717,15 @@ static void main_fsm_task(void *pvParameters) {
 
         case APP_STATE_HANDSHAKING: {
             ESP_LOGI(TAG, "Starting new session...");
+
+            /* Check if WebSocket is still connected */
+            if (!doubao_ws_is_connected(&g_ws_client)) {
+                ESP_LOGW(TAG, "WebSocket not connected, reconnecting first");
+                doubao_ws_destroy(&g_ws_client);
+                set_app_state(APP_STATE_CONNECTING);
+                ui_lcd_set_hint("Reconnecting...");
+                break;
+            }
 
             /* Clear TTS text display for new session */
             g_tts_text[0] = '\0';
