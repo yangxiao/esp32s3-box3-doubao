@@ -77,8 +77,10 @@ static void afe_feed_task(void *pvParameters) {
 
     uint32_t feed_count = 0;
     while (s_running) {
-        if (feed_count++ % 5000 == 0) {
-            ESP_LOGI(TAG, "Feed loop alive, count=%lu", (unsigned long)feed_count);
+        if (feed_count++ % 500 == 0) {
+            ESP_LOGI(TAG, "Feed loop alive, count=%lu, wakenet_enabled=%d",
+                     (unsigned long)feed_count,
+                     (s_afe && s_afe_data) ? 1 : 0);
         }
 
         /* Read 2-channel interleaved mic data */
@@ -138,7 +140,7 @@ static void afe_fetch_task(void *pvParameters) {
 
     uint32_t fetch_count = 0;
     while (s_running) {
-        if (fetch_count++ % 5000 == 0) {
+        if (fetch_count++ % 500 == 0) {
             ESP_LOGI(TAG, "Fetch loop alive, count=%lu", (unsigned long)fetch_count);
         }
 
