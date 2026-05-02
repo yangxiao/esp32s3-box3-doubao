@@ -458,7 +458,7 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                 g_session_active = false;
                 afe_handler_set_streaming(false);
                 afe_handler_enable_wakenet();
-                set_app_state(APP_STATE_IDLE);
+                set_app_state(APP_STATE_CONNECTED_IDLE);
                 ui_lcd_set_asr_text("");
                 ui_lcd_set_tts_text("");
                 ui_lcd_set_hint("Say \"hi, jason\" or press button");
@@ -638,6 +638,15 @@ static void main_fsm_task(void *pvParameters) {
             /* Disable wake word during connection setup */
             afe_handler_disable_wakenet();
 
+            /* Check if already connected - if yes, just go to CONNECTED_IDLE */
+            if (doubao_ws_is_connected(&g_ws_client)) {
+                ESP_LOGI(TAG, "Already connected, going to CONNECTED_IDLE");
+                afe_handler_enable_wakenet();
+                set_app_state(APP_STATE_CONNECTED_IDLE);
+                ui_lcd_set_hint("Say \"hi, jason\" or press button");
+                break;
+            }
+
             /* Connect WebSocket */
             doubao_ws_config_t ws_config = {
                 .app_id = CONFIG_DOUBAO_APP_ID,
@@ -653,6 +662,13 @@ static void main_fsm_task(void *pvParameters) {
              (unsigned long)esp_get_free_heap_size(),
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+
+            /* Check if client is already initialized - if yes, destroy first */
+            if (g_ws_client.event_group || g_ws_client.recv_buf || g_ws_client.ws_handle) {
+                ESP_LOGW(TAG, "WebSocket client already initialized, destroying first");
+                doubao_ws_destroy(&g_ws_client);
+            }
+
             if (doubao_ws_init(&g_ws_client, &ws_config) != 0) {
                 ESP_LOGE(TAG, "WS init failed");
                 afe_handler_enable_wakenet();
