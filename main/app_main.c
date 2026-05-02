@@ -208,9 +208,18 @@ static int wifi_init_sta(void) {
 /* ---- Wake word callback (called from afe_fetch_task context) ---- */
 
 static void on_wake_word(int wake_word_index, void *userdata) {
-    ESP_LOGI(TAG, "Wake word detected! index=%d, state=%d", wake_word_index, g_app_state);
+    ESP_LOGI(TAG, "Wake word detected! index=%d, state=%d, connected=%d",
+             wake_word_index, g_app_state, doubao_ws_is_connected(&g_ws_client));
 
     if (g_app_state == APP_STATE_CONNECTED_IDLE) {
+        /* Check if we're still connected - if not, first reconnect */
+        if (!doubao_ws_is_connected(&g_ws_client)) {
+            ESP_LOGW(TAG, "WebSocket not connected, will reconnect first");
+            /* WakeNet is still enabled, state machine will handle reconnection */
+            ui_lcd_set_hint("Reconnecting...");
+            /* Don't change state here - let the main loop handle it */
+            return;
+        }
         /* Start a new session */
         afe_handler_disable_wakenet();
         set_app_state(APP_STATE_HANDSHAKING);
@@ -660,6 +669,14 @@ static void main_fsm_task(void *pvParameters) {
                 break;
             }
 
+            /* First check if client needs to be cleaned up */
+            bool needs_cleanup = false;
+            if (g_ws_client.event_group || g_ws_client.recv_buf || g_ws_client.ws_handle) {
+                ESP_LOGW(TAG, "WebSocket client needs cleanup, destroying first");
+                doubao_ws_destroy(&g_ws_client);
+                needs_cleanup = true;
+            }
+
             /* Connect WebSocket */
             doubao_ws_config_t ws_config = {
                 .app_id = CONFIG_DOUBAO_APP_ID,
@@ -671,16 +688,9 @@ static void main_fsm_task(void *pvParameters) {
                 .asr_audio_format = NULL, /* Raw PCM */
                 .recv_timeout = 10,
             };
-            ESP_LOGI(TAG, "B4 WS connect, Free heap: %lu, PSRAM: %lu, IRAM: %lu",
+            ESP_LOGI(TAG, "WebSocket connecting... Free heap: %lu, PSRAM: %lu",
              (unsigned long)esp_get_free_heap_size(),
-             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-
-            /* Check if client is already initialized - if yes, destroy first */
-            if (g_ws_client.event_group || g_ws_client.recv_buf || g_ws_client.ws_handle) {
-                ESP_LOGW(TAG, "WebSocket client already initialized, destroying first");
-                doubao_ws_destroy(&g_ws_client);
-            }
+             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
             if (doubao_ws_init(&g_ws_client, &ws_config) != 0) {
                 ESP_LOGE(TAG, "WS init failed");
@@ -726,8 +736,14 @@ static void main_fsm_task(void *pvParameters) {
 
         case APP_STATE_CONNECTED_IDLE:
             /* Check if WebSocket is still connected - if not, reconnect */
-            if (!doubao_ws_is_connected(&g_ws_client)) {
-                ESP_LOGW(TAG, "WebSocket disconnected, reconnecting...");
+            static uint32_t last_connection_check = 0;
+            uint32_t now = esp_log_timestamp();
+            if (!doubao_ws_is_connected(&g_ws_client) || (now - last_connection_check > 5000)) {
+                if (!doubao_ws_is_connected(&g_ws_client)) {
+                    ESP_LOGW(TAG, "WebSocket disconnected, reconnecting...");
+                }
+                last_connection_check = now;
+                /* Clean up and reconnect */
                 doubao_ws_destroy(&g_ws_client);
                 set_app_state(APP_STATE_CONNECTING);
                 ui_lcd_set_hint("Reconnecting...");
@@ -756,6 +772,8 @@ static void main_fsm_task(void *pvParameters) {
                 ui_lcd_set_hint("Reconnecting...");
                 break;
             }
+
+            ESP_LOGI(TAG, "WebSocket is connected, proceeding with handshake");
 
             /* Clear TTS text display for new session */
             g_tts_text[0] = '\0';
