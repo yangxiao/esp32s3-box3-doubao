@@ -35,6 +35,9 @@ static void afe_fetch_task(void *pvParameters);
 /* ---- AFE Feed Task (Core 1, highest audio priority) ---- */
 
 static void afe_feed_task(void *pvParameters) {
+    ESP_LOGI(TAG, "afe_feed_task STARTED on core %d, priority %d",
+             xPortGetCoreID(), uxTaskPriorityGet(NULL));
+
     const int total_ch = 3;  /* MMR: mic1, mic2, ref */
     int samples_per_ch = s_feed_chunksize / total_ch;
 
@@ -43,12 +46,16 @@ static void afe_feed_task(void *pvParameters) {
     size_t ref_buf_bytes = samples_per_ch * sizeof(int16_t);
     size_t feed_buf_bytes = s_feed_chunksize * sizeof(int16_t);
 
+    ESP_LOGI(TAG, "Allocating buffers: mic=%d, ref=%d, feed=%d",
+             (int)mic_buf_bytes, (int)ref_buf_bytes, (int)feed_buf_bytes);
+
     int16_t *mic_buf = heap_caps_malloc(mic_buf_bytes, MALLOC_CAP_SPIRAM);
     int16_t *ref_buf = heap_caps_malloc(ref_buf_bytes, MALLOC_CAP_SPIRAM);
     int16_t *feed_buf = heap_caps_malloc(feed_buf_bytes, MALLOC_CAP_SPIRAM);
 
     if (!mic_buf || !ref_buf || !feed_buf) {
-        ESP_LOGE(TAG, "Failed to alloc feed buffers");
+        ESP_LOGE(TAG, "Failed to alloc feed buffers! mic=%p, ref=%p, feed=%p",
+                 mic_buf, ref_buf, feed_buf);
         free(mic_buf); free(ref_buf); free(feed_buf);
         vTaskDelete(NULL);
         return;
@@ -58,9 +65,13 @@ static void afe_feed_task(void *pvParameters) {
              s_feed_chunksize, samples_per_ch);
 
     /* Start fetch task before entering loop */
-    ESP_LOGI(TAG, "Starting fetch task...");
-    xTaskCreatePinnedToCore(afe_fetch_task, "afe_fetch", 3072, NULL, 22, &s_fetch_task_handle, 0);
-    ESP_LOGI(TAG, "Fetch task started");
+    ESP_LOGI(TAG, "Creating afe_fetch task: prio=22, core=0, stack=3072");
+    BaseType_t ret = xTaskCreatePinnedToCore(afe_fetch_task, "afe_fetch", 3072, NULL, 22, &s_fetch_task_handle, 0);
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create afe_fetch task! ret=%d", ret);
+    } else {
+        ESP_LOGI(TAG, "AFE fetch task created successfully, handle=%p", s_fetch_task_handle);
+    }
 
     RingbufHandle_t ref_rb = audio_hal_get_ref_rb();
 
@@ -118,6 +129,9 @@ static void afe_feed_task(void *pvParameters) {
 /* ---- AFE Fetch Task (Core 0) ---- */
 
 static void afe_fetch_task(void *pvParameters) {
+    ESP_LOGI(TAG, "afe_fetch_task STARTED on core %d, priority %d",
+             xPortGetCoreID(), uxTaskPriorityGet(NULL));
+
     RingbufHandle_t capture_rb = audio_hal_get_capture_rb();
 
     ESP_LOGI(TAG, "Fetch task started: chunksize=%d samples", s_fetch_chunksize);
@@ -259,8 +273,13 @@ void afe_handler_start(void) {
     s_streaming = false;
 
     /* Only start feed task, fetch task will be started from feed task */
-    xTaskCreatePinnedToCore(afe_feed_task, "afe_feed", 3072, NULL, 23, &s_feed_task_handle, 1);
-    ESP_LOGI(TAG, "AFE feed task started");
+    ESP_LOGI(TAG, "Creating afe_feed task: prio=23, core=1, stack=3072");
+    BaseType_t ret = xTaskCreatePinnedToCore(afe_feed_task, "afe_feed", 3072, NULL, 23, &s_feed_task_handle, 1);
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create afe_feed task! ret=%d", ret);
+    } else {
+        ESP_LOGI(TAG, "AFE feed task created successfully, handle=%p", s_feed_task_handle);
+    }
 }
 
 void afe_handler_set_streaming(bool enable) {

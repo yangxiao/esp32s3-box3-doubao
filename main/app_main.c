@@ -881,8 +881,24 @@ void app_main(void) {
     task_ret = xTaskCreatePinnedToCore(main_fsm_task, "main_fsm",
                             6144, NULL, 10, NULL, 0);
     ESP_LOGI(TAG, "main_fsm_task task ret=%d", task_ret);
-    // 关键：检查任务是否在就绪队列
-    ESP_LOGI("SCHED", "Tasks created, checking scheduler...");
+
+    /* Wait a bit for AFE tasks to start */
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    // 打印所有任务状态和优先级
+    ESP_LOGI("SCHED", "=== All Tasks ===");
+    {
+        static char task_list_buf[2048];
+        vTaskList(task_list_buf);
+        ESP_LOGI("SCHED", "Name\t\tState\tPrio\tStack\tNum\n");
+        ESP_LOGI("SCHED", "------------------------------------------------\n");
+        char *line = strtok(task_list_buf, "\n");
+        while (line != NULL) {
+            ESP_LOGI("SCHED", "%s", line);
+            line = strtok(NULL, "\n");
+        }
+        ESP_LOGI("SCHED", "------------------------------------------------\n");
+    }
 
     /* Immediately start connecting to server */
     set_app_state(APP_STATE_CONNECTING);
