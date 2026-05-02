@@ -51,6 +51,8 @@ static volatile bool g_session_active = false;
 static volatile bool g_say_hello_done = false;
 static volatile bool g_user_querying = false;
 static volatile bool g_bargein_requested = false;  /* Phase 2: barge-in flag */
+static char g_tts_text[512] = {0};  /* Accumulate TTS text for display */
+static char g_last_reply_id[128] = {0};  /* Last reply_id to detect new replies */
 
 /* Button GPIO (BOX-3 BOOT/CONFIG button is GPIO0, active low) */
 #define BUTTON_GPIO  BSP_BUTTON_CONFIG_IO
@@ -265,10 +267,23 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
             case 350:
                 ESP_LOGI(TAG, "Event 350: TTS text available");
                 if (resp->payload_data && !resp->is_binary) {
-                    //ESP_LOGI(TAG, "TTS text: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
-                    ESP_LOGI(TAG, "TTS text: payload_data_len=%d", (int)resp->payload_data_len);
-                    //ui_lcd_set_tts_text("speaking... letters");
-                    ui_lcd_set_tts_text((const char *)resp->payload_data);
+                    ESP_LOGI(TAG, "TTS text: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
+
+                    /* Parse JSON to get text field and append */
+                    cJSON *root = cJSON_ParseWithLength((const char *)resp->payload_data, resp->payload_data_len);
+                    if (root) {
+                        cJSON *text = cJSON_GetObjectItem(root, "text");
+                        if (text && cJSON_IsString(text)) {
+                            /* Append to accumulated text */
+                            size_t current_len = strlen(g_tts_text);
+                            size_t text_len = strlen(text->valuestring);
+                            if (current_len + text_len < sizeof(g_tts_text) - 1) {
+                                strcat(g_tts_text, text->valuestring);
+                                ui_lcd_set_tts_text(g_tts_text);
+                            }
+                        }
+                        cJSON_Delete(root);
+                    }
                 }
                 break;
 
@@ -339,12 +354,35 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                 if (resp->payload_data && !resp->is_binary) {
                     ESP_LOGI(TAG, "Reply: %.*s", (int)resp->payload_data_len, (char *)resp->payload_data);
 
-                    /* Parse JSON to get content field */
+                    /* Parse JSON to get reply_id and content */
                     cJSON *root = cJSON_ParseWithLength((const char *)resp->payload_data, resp->payload_data_len);
                     if (root) {
+                        /* Check if reply_id changed - if yes, clear accumulated text */
+                        cJSON *reply_id = cJSON_GetObjectItem(root, "reply_id");
+                        if (reply_id && cJSON_IsString(reply_id)) {
+                            /* First check if there was a previous reply_id */
+                            if (g_last_reply_id[0] != '\0') {
+                                if (strcmp(g_last_reply_id, reply_id->valuestring) != 0) {
+                                    /* New reply detected, clear accumulated text */
+                                    ESP_LOGI(TAG, "New reply_id detected, clearing TTS text");
+                                    g_tts_text[0] = '\0';
+                                }
+                            }
+                            /* Save current reply_id */
+                            strncpy(g_last_reply_id, reply_id->valuestring, sizeof(g_last_reply_id) - 1);
+                            g_last_reply_id[sizeof(g_last_reply_id) - 1] = '\0';
+                        }
+
+                        /* Get and append content */
                         cJSON *content = cJSON_GetObjectItem(root, "content");
                         if (content && cJSON_IsString(content)) {
-                            ui_lcd_set_tts_text(content->valuestring);
+                            /* Append to accumulated text */
+                            size_t current_len = strlen(g_tts_text);
+                            size_t content_len = strlen(content->valuestring);
+                            if (current_len + content_len < sizeof(g_tts_text) - 1) {
+                                strcat(g_tts_text, content->valuestring);
+                                ui_lcd_set_tts_text(g_tts_text);
+                            }
                         }
                         cJSON_Delete(root);
                     }
@@ -561,6 +599,10 @@ static void main_fsm_task(void *pvParameters) {
             g_bargein_requested = false;
             ESP_LOGI(TAG, "Processing barge-in: finishing current session, restarting");
 
+            /* Clear TTS text display for new session */
+            g_tts_text[0] = '\0';
+            g_last_reply_id[0] = '\0';
+
             /* Finish the current session and start a new one - keep connection alive */
             doubao_ws_finish_session(&g_ws_client);
             vTaskDelay(pdMS_TO_TICKS(300));
@@ -655,6 +697,11 @@ static void main_fsm_task(void *pvParameters) {
 
         case APP_STATE_HANDSHAKING: {
             ESP_LOGI(TAG, "Starting new session...");
+
+            /* Clear TTS text display for new session */
+            g_tts_text[0] = '\0';
+            g_last_reply_id[0] = '\0';
+            ui_lcd_set_tts_text("");
 
             /* Start session and say hello - connection already established */
             if (doubao_ws_start_session(&g_ws_client) != 0) {
