@@ -478,7 +478,37 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                  (unsigned)resp->error_code,
                  (int)resp->payload_data_len,
                  resp->payload_data ? (char *)resp->payload_data : "");
-        g_running = false;
+
+        /* 对于超时等可恢复的错误，只结束当前会话而不停止整个系统 */
+        /* 错误码 55000001 = DialogAudioIdleTimeoutError */
+        if (resp->error_code == 55000001 || resp->error_code == 52000042) {
+            ESP_LOGW(TAG, "Recoverable error, cleaning up session...");
+
+            /* 清理当前会话状态 */
+            audio_hal_clear_playback();
+            audio_hal_clear_capture();
+            audio_hal_clear_ref();
+            opus_proc_reset_ogg(&g_opus_proc);
+            afe_handler_set_streaming(false);
+
+            g_session_active = false;
+            g_tts_text[0] = '\0';
+            g_last_reply_id[0] = '\0';
+
+            /* 尝试结束当前会话（如果还没有结束） */
+            doubao_ws_finish_session(&g_ws_client);
+            vTaskDelay(pdMS_TO_TICKS(300));
+
+            /* 返回到就绪状态 */
+            afe_handler_enable_wakenet();
+            set_app_state(APP_STATE_CONNECTED_IDLE);
+            ui_lcd_set_asr_text("");
+            ui_lcd_set_tts_text("");
+            ui_lcd_set_hint("Timeout, say \"hi, jason\" again");
+        } else {
+            /* 对于其他严重错误，还是停止系统 */
+            g_running = false;
+        }
     }
 }
 
