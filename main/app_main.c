@@ -503,12 +503,8 @@ static void on_decoded_pcm(const int16_t *pcm, size_t samples, void *userdata) {
 static void audio_play_task(void *pvParameters) {
     RingbufHandle_t playback_rb = audio_hal_get_playback_rb();
     RingbufHandle_t ref_rb = audio_hal_get_ref_rb();
-    uint32_t play_count = 0;
     ESP_LOGI(TAG, "Audio play task started.");
     while (g_running) {
-        if (play_count++ % 1000 == 0) {
-            ESP_LOGI(TAG, "Play loop alive, count=%lu", (unsigned long)play_count);
-        }
         if (!playback_rb) {
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
@@ -546,18 +542,12 @@ static void ws_tx_task(void *pvParameters) {
 
     RingbufHandle_t capture_rb = audio_hal_get_capture_rb();
     size_t accumulated = 0;
-    static uint32_t tx_log_counter = 0;
-    static uint32_t state_log_counter = 0;
 
     while (g_running) {
         if (g_app_state != APP_STATE_LISTENING) {
             vTaskDelay(pdMS_TO_TICKS(50));
             accumulated = 0;
             continue;
-        }
-
-        if (state_log_counter++ % 200 == 0) {
-            ESP_LOGI(TAG, "ws_tx_task: LISTENING state, connected=%d", doubao_ws_is_connected(&g_ws_client));
         }
 
         if (!capture_rb || !doubao_ws_is_connected(&g_ws_client)) {
@@ -580,9 +570,6 @@ static void ws_tx_task(void *pvParameters) {
             if (accumulated >= chunk_bytes) {
                 if (g_app_state == APP_STATE_LISTENING) {
                     doubao_ws_send_audio(&g_ws_client, (const uint8_t *)pcm_chunk, accumulated);
-                    if (tx_log_counter++ % 50 == 0) {
-                        ESP_LOGI(TAG, "Sent audio chunk: %d bytes", (int)accumulated);
-                    }
                 }
                 accumulated = 0;
             }
@@ -600,11 +587,7 @@ static void ws_tx_task(void *pvParameters) {
 static void main_fsm_task(void *pvParameters) {
     ESP_LOGI(TAG, "FSM task started, say \"hi, jason\" or press button...");
 
-    static uint32_t state_log_counter = 0;
     while (g_running) {
-        if (state_log_counter++ % 200 == 0) {
-            ESP_LOGI(TAG, "FSM state: %d, session_active=%d", g_app_state, g_session_active);
-        }
 
         /* Handle barge-in request from wake word callback (Path A) */
         if (g_bargein_requested) {
