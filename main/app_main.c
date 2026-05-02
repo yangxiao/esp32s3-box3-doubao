@@ -397,9 +397,6 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
 
             case EVENT_TTS_ENDED: {
                 ESP_LOGI(TAG, "Event 359: TTS ended");
-                if (!g_say_hello_done) {
-                    g_say_hello_done = true;
-                }
 
                 /* Check for exit intent: status_code "20000002" */
                 bool exit_intent = false;
@@ -420,7 +417,11 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                 audio_hal_clear_ref();
                 opus_proc_reset_ogg(&g_opus_proc);
 
-                if (exit_intent) {
+                /* Check if this is the initial SayHello in Handshaking state */
+                if (!g_say_hello_done) {
+                    g_say_hello_done = true;
+                    ESP_LOGI(TAG, "SayHello TTS complete, let Handshaking state continue");
+                } else if (exit_intent) {
                     /* Gracefully end session, keep connection alive */
                     ESP_LOGI(TAG, "Exit intent: finishing session, keeping connection alive");
                     afe_handler_set_streaming(false);
