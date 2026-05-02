@@ -51,8 +51,8 @@ static volatile bool g_session_active = false;
 static volatile bool g_say_hello_done = false;
 static volatile bool g_user_querying = false;
 static volatile bool g_bargein_requested = false;  /* Phase 2: barge-in flag */
-static char g_tts_text[512] = {0};  /* Accumulate TTS text for display */
-static char g_last_reply_id[128] = {0};  /* Last reply_id to detect new replies */
+static char g_tts_text[1024] = {0};  /* Accumulate TTS text for display */
+static char g_last_reply_id[256] = {0};  /* Last reply_id to detect new replies */
 
 /* Button GPIO (BOX-3 BOOT/CONFIG button is GPIO0, active low) */
 #define BUTTON_GPIO  BSP_BUTTON_CONFIG_IO
@@ -273,12 +273,15 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                     cJSON *root = cJSON_ParseWithLength((const char *)resp->payload_data, resp->payload_data_len);
                     if (root) {
                         cJSON *text = cJSON_GetObjectItem(root, "text");
-                        if (text && cJSON_IsString(text)) {
+                        if (text && cJSON_IsString(text) && text->valuestring) {
                             /* Append to accumulated text */
                             size_t current_len = strlen(g_tts_text);
                             size_t text_len = strlen(text->valuestring);
-                            if (current_len + text_len < sizeof(g_tts_text) - 1) {
-                                strcat(g_tts_text, text->valuestring);
+                            size_t available = sizeof(g_tts_text) - 1 - current_len;
+                            if (text_len > 0 && available > 0) {
+                                size_t copy_len = (text_len < available) ? text_len : available;
+                                memcpy(g_tts_text + current_len, text->valuestring, copy_len);
+                                g_tts_text[current_len + copy_len] = '\0';
                                 ui_lcd_set_tts_text(g_tts_text);
                             }
                         }
@@ -361,7 +364,7 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                     if (root) {
                         /* Check if reply_id changed - if yes, clear accumulated text */
                         cJSON *reply_id = cJSON_GetObjectItem(root, "reply_id");
-                        if (reply_id && cJSON_IsString(reply_id)) {
+                        if (reply_id && cJSON_IsString(reply_id) && reply_id->valuestring) {
                             /* First check if there was a previous reply_id */
                             if (g_last_reply_id[0] != '\0') {
                                 if (strcmp(g_last_reply_id, reply_id->valuestring) != 0) {
@@ -371,18 +374,23 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                                 }
                             }
                             /* Save current reply_id */
-                            strncpy(g_last_reply_id, reply_id->valuestring, sizeof(g_last_reply_id) - 1);
-                            g_last_reply_id[sizeof(g_last_reply_id) - 1] = '\0';
+                            size_t reply_id_len = strlen(reply_id->valuestring);
+                            size_t copy_len = (reply_id_len < sizeof(g_last_reply_id) - 1) ? reply_id_len : sizeof(g_last_reply_id) - 1;
+                            memcpy(g_last_reply_id, reply_id->valuestring, copy_len);
+                            g_last_reply_id[copy_len] = '\0';
                         }
 
                         /* Get and append content */
                         cJSON *content = cJSON_GetObjectItem(root, "content");
-                        if (content && cJSON_IsString(content)) {
+                        if (content && cJSON_IsString(content) && content->valuestring) {
                             /* Append to accumulated text */
                             size_t current_len = strlen(g_tts_text);
                             size_t content_len = strlen(content->valuestring);
-                            if (current_len + content_len < sizeof(g_tts_text) - 1) {
-                                strcat(g_tts_text, content->valuestring);
+                            size_t available = sizeof(g_tts_text) - 1 - current_len;
+                            if (content_len > 0 && available > 0) {
+                                size_t copy_len = (content_len < available) ? content_len : available;
+                                memcpy(g_tts_text + current_len, content->valuestring, copy_len);
+                                g_tts_text[current_len + copy_len] = '\0';
                                 ui_lcd_set_tts_text(g_tts_text);
                             }
                         }
@@ -883,17 +891,11 @@ void app_main(void) {
 
     /* Main FSM task on Core 0 */
     task_ret = xTaskCreatePinnedToCore(main_fsm_task, "main_fsm",
-                            6144, NULL, 10, NULL, 0);
+                            8192, NULL, 10, NULL, 0);
     ESP_LOGI(TAG, "main_fsm_task task ret=%d", task_ret);
 
     /* Wait a bit for AFE tasks to start */
-    vTaskDelay(pdMS_TO_TICKS(500));
-
-    // 打印所有任务状态和优先级
-    ESP_LOGI("SCHED", "=== All Tasks ===");
-    static char task_list_buf[2048];
-    vTaskList(task_list_buf);
-    ESP_LOGI("SCHED", "Task list:\n%s", task_list_buf);
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     /* Immediately start connecting to server */
     set_app_state(APP_STATE_CONNECTING);
