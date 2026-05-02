@@ -335,6 +335,7 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                 audio_hal_clear_ref();
                 opus_proc_reset_ogg(&g_opus_proc);
                 g_user_querying = true;
+                afe_handler_disable_wakenet();
                 afe_handler_set_streaming(true);
                 set_app_state(APP_STATE_LISTENING);
                 ui_lcd_set_hint("Listening...");
@@ -344,6 +345,7 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                 ESP_LOGI(TAG, "Event 459: user query end");
                 g_user_querying = false;
                 afe_handler_set_streaming(false);
+                afe_handler_enable_wakenet();
                 audio_hal_clear_capture();
                 set_app_state(APP_STATE_SPEAKING);
                 ui_lcd_set_hint("AI is responding...");
@@ -433,6 +435,7 @@ static void on_ws_receive(const parsed_response_t *resp, void *userdata) {
                 } else {
                     /* Continue conversation: go back to LISTENING */
                     g_user_querying = true;
+                    afe_handler_disable_wakenet();
                     afe_handler_set_streaming(true);
                     set_app_state(APP_STATE_LISTENING);
                     ui_lcd_set_hint("Listening...");
@@ -733,10 +736,10 @@ static void main_fsm_task(void *pvParameters) {
                 ESP_LOGW(TAG, "SayHello timeout, starting listening anyway");
             }
 
-            /* Enable AFE streaming and wake word for barge-in */
+            /* Enable AFE streaming for listening */
             audio_hal_clear_capture();
+            afe_handler_disable_wakenet();
             afe_handler_set_streaming(true);
-            afe_handler_enable_wakenet();
             g_user_querying = true;
             set_app_state(APP_STATE_LISTENING);
             ui_lcd_set_hint("Listening...");
@@ -887,18 +890,9 @@ void app_main(void) {
 
     // 打印所有任务状态和优先级
     ESP_LOGI("SCHED", "=== All Tasks ===");
-    {
-        static char task_list_buf[2048];
-        vTaskList(task_list_buf);
-        ESP_LOGI("SCHED", "Name\t\tState\tPrio\tStack\tNum\n");
-        ESP_LOGI("SCHED", "------------------------------------------------\n");
-        char *line = strtok(task_list_buf, "\n");
-        while (line != NULL) {
-            ESP_LOGI("SCHED", "%s", line);
-            line = strtok(NULL, "\n");
-        }
-        ESP_LOGI("SCHED", "------------------------------------------------\n");
-    }
+    static char task_list_buf[2048];
+    vTaskList(task_list_buf);
+    ESP_LOGI("SCHED", "Task list:\n%s", task_list_buf);
 
     /* Immediately start connecting to server */
     set_app_state(APP_STATE_CONNECTING);
